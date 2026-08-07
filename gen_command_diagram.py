@@ -20,6 +20,8 @@ from collections import OrderedDict
 
 import yaml
 
+ROLLBACK_GLOBALS = {}
+
 SHORT_NODE = {
     "niam_dpa_node1": "node1",
     "niam_dpa_node2": "node2",
@@ -277,6 +279,517 @@ def phase_diagram(phase_name, rows, pid, default_on_failure="stop"):
     return "\n".join(L)
 
 
+
+# ============================================================================ #
+#  Auto-rollback explorer
+#
+#  For any ACTIVITY command that can arm a rollback, work out which
+#  ROLLBACK_CONFIGURATION steps would actually execute. The rollback steps are
+#  gated by `when` / `skip_when` on variables the earlier phases set, so the
+#  answer genuinely differs per failure point - it has to be computed, not drawn.
+#
+#  Conditions are evaluated with THREE-VALUED logic. Anything that depends on a
+#  value only the real node can produce (a captured version string, a checksum
+#  comparison) resolves to UNKNOWN and is reported as "depends", never guessed.
+# ============================================================================ #
+
+UNKNOWN = None
+_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_CMP = re.compile(r"^\s*(.+?)\s*(==|!=|>=|<=|>|<)\s*(.+?)\s*$")
+
+
+# Supplied from outside the workflow (CIQ / arglist). We cannot know their
+# values, so they stay UNKNOWN rather than being read as empty.
+EXTERNAL_UNKNOWN = {
+    "NEW_VERSION", "TAC_COUNT", "NEW_FILE_NAME", "ORDER_NO", "PARENT_REQ_ID",
+    "NODE1_NAME", "NODE2_NAME", "NODE1_NIAM_NAME", "NODE2_NIAM_NAME",
+    "REPO_IP", "REPO_USER", "REPO_PASSWORD", "NIAM_IP", "M2MPORT", "M2MUSER",
+    "M2MPASSWORD", "GITLAB_CLIENT_ID", "GITLAB_CLIENT_SECRET", "GITLAB_PROJECT_ID",
+    "CR_NAME", "Group", "crGroup", "email", "ALERT_EMAIL_TO", "ALERT_EMAIL_CC",
+}
+
+
+def _resolve(tok, state):
+    """(known, value) for one side of a comparison.
+
+    A variable the workflow never assigned on this path is NOT unknown - the
+    engine interpolates it as an empty string, which is a definite answer. Only
+    values captured from live command output, or supplied from outside the
+    workflow, are genuinely unknowable here.
+    """
+    tok = tok.strip()
+    if len(tok) >= 2 and tok[0] in "\"'" and tok[-1] == tok[0]:
+        return True, tok[1:-1]
+    if _IDENT.match(tok):
+        if tok in state:
+            return (state[tok] is not None), state[tok]
+        if tok in EXTERNAL_UNKNOWN:
+            return False, None
+        return True, ""          # never assigned -> empty
+    return False, None
+
+
+def eval_atom(atom, state):
+    m = _CMP.match(atom)
+    if not m:
+        return UNKNOWN
+    lk, lv = _resolve(m.group(1), state)
+    rk, rv = _resolve(m.group(3), state)
+    if not lk or not rk:
+        return UNKNOWN
+    op = m.group(2)
+    if op == "==":
+        return lv == rv
+    if op == "!=":
+        return lv != rv
+    if op == ">":
+        return lv > rv
+    if op == "<":
+        return lv < rv
+    if op == ">=":
+        return lv >= rv
+    if op == "<=":
+        return lv <= rv
+    return UNKNOWN
+
+
+def eval_expr(expr, state):
+    """True / False / UNKNOWN for a workflow condition."""
+    if expr is None or str(expr).strip() == "":
+        return True
+    s = str(expr).strip()
+    if s.startswith("${") and s.endswith("}"):
+        s = s[2:-1].strip()
+    if "(" in s or ")" in s:          # no grouping in these workflows; be honest
+        return UNKNOWN
+    any_unknown = False
+    for clause in s.split("||"):
+        c_false = False
+        c_unknown = False
+        for atom in clause.split("&&"):
+            v = eval_atom(atom, state)
+            if v is False:
+                c_false = True
+                break
+            if v is UNKNOWN:
+                c_unknown = True
+        if c_false:
+            continue
+        if c_unknown:
+            any_unknown = True
+        else:
+            return True
+    return UNKNOWN if any_unknown else False
+
+
+def _subst(value, state):
+    """Resolve ${VAR} inside a register value; UNKNOWN if it cannot be resolved."""
+    v = str(value)
+    if "${" not in v:
+        return v
+    out = v
+    for m in re.finditer(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", v):
+        name = m.group(1)
+        if name in state and state[name] is not None:
+            out = out.replace(m.group(0), state[name])
+        else:
+            return None
+    return out
+
+
+def apply_step(st, state, branch):
+    """Apply one step's effects to the variable state."""
+    for r in st.get("register") or []:
+        if not isinstance(r, dict):
+            continue
+        if r.get("name"):
+            cond = r.get("when")
+            v = eval_expr(cond, state) if cond else True
+            if v is True:
+                state[r["name"]] = _subst(r.get("value", ""), state)
+            elif v is UNKNOWN:
+                state[r["name"]] = None
+        else:
+            # captured from live command output - unknowable statically
+            for m in re.finditer(r"\(\?<([A-Za-z_][A-Za-z0-9_]*)>", str(r.get("regex", ""))):
+                state[m.group(1)] = None
+    val = st.get("validation")
+    if isinstance(val, dict):
+        b = val.get(branch)
+        if isinstance(b, dict):
+            for k, v in (b.get("vars") or {}).items():
+                state[k] = str(v)
+
+
+def arming_points(act_rows):
+    """Activity step numbers whose failure branch sets ROLLBACK_REQUIRED=true."""
+    out = []
+    for i, (st, _loop) in enumerate(act_rows, 1):
+        val = st.get("validation")
+        fail = val.get("failure") if isinstance(val, dict) else None
+        vs = (fail or {}).get("vars") or {}
+        if str(vs.get("ROLLBACK_REQUIRED", "")).lower() == "true":
+            out.append(i)
+    return out
+
+
+def simulate(phase_rows, act_rows, fail_idx, gvars):
+    """State after PRE + BACKUP succeed and ACTIVITY fails at `fail_idx`."""
+    state = {}
+    for k, v in (gvars or {}).items():
+        state[k] = "" if v is None else str(v)
+    state["ROLLBACK_ONLY"] = "false"          # an auto-rollback, not a manual one
+    for rows in phase_rows:
+        for st, _loop in rows:
+            apply_step(st, state, "success")
+    for i, (st, _loop) in enumerate(act_rows, 1):
+        if i < fail_idx:
+            apply_step(st, state, "success")
+        elif i == fail_idx:
+            apply_step(st, state, "failure")
+            break
+    return state
+
+
+def rollback_plan(rb_rows, state):
+    """[(idx, step, verdict)] with verdict RUN / SKIP / DEPENDS."""
+    plan = []
+    st_state = dict(state)
+    for i, (st, _loop) in enumerate(rb_rows, 1):
+        w = eval_expr(st.get("when"), st_state) if st.get("when") else True
+        sk = eval_expr(st.get("skip_when"), st_state) if st.get("skip_when") else False
+        if w is False or sk is True:
+            verdict = "SKIP"
+        elif w is UNKNOWN or sk is UNKNOWN:
+            verdict = "DEPENDS"
+        else:
+            verdict = "RUN"
+        plan.append((i, st, verdict))
+        if verdict != "SKIP":
+            apply_step(st, st_state, "success")
+    return plan
+
+
+def cmd_text(st):
+    """The command a step sends, as written in the YAML."""
+    cmd = st.get("send")
+    if cmd is None and isinstance(st.get("rest"), dict):
+        r = st["rest"]
+        cmd = f'{r.get("method","GET")} {r.get("path","")}'
+    return " ".join(str(cmd if cmd is not None else "(plugin step)").split())
+
+
+def plain(text, limit=None):
+    """HTML-escaped text. Unlike clean() this keeps ${VAR} intact - it is only
+    mermaid labels that cannot carry braces."""
+    s = " ".join(str(text).split())
+    if limit and len(s) > limit:
+        s = s[:limit - 1] + "…"
+    return html.escape(s)
+
+
+def _box(st, i, prefix):
+    node = SHORT_NODE.get(str(st.get("node", "local")), str(st.get("node", "local")))
+    cmd = st.get("send")
+    if cmd is None and isinstance(st.get("rest"), dict):
+        cmd = f'{st["rest"].get("method","GET")} {st["rest"].get("path","")}'
+    return f'<b>{prefix}{i}. {clean(node)}</b><br/>{wrap(clean(cmd if cmd is not None else "(plugin step)"), 42, 2)}'
+
+
+def mixed_diagram(act_rows, fail_idx, rb_rows, plan, key):
+    """Activity path up to the failure, then the rollback that really runs."""
+    L = []
+    A = L.append
+    A('%%{init:{"theme":"base","themeVariables":{'
+      '"fontFamily":"Segoe UI, system-ui, sans-serif","fontSize":"13px",'
+      '"primaryColor":"#eaf0f7","primaryTextColor":"#10243a",'
+      '"primaryBorderColor":"#2a6099","lineColor":"#8095ab",'
+      '"textColor":"#10243a","nodeTextColor":"#10243a",'
+      '"edgeLabelBackground":"#ffffff","labelBackground":"#ffffff",'
+      '"tertiaryColor":"#ffffff","mainBkg":"#eaf0f7"}}}%%')
+    A("flowchart TD")
+    A('  S(["ACTIVITY_CONFIGURATION"])')
+
+    done, prev = [], "S"
+    for i in range(1, fail_idx):
+        nid = f"{key}a{i}"
+        A(f'  {nid}["{_box(act_rows[i-1][0], i, "")}"]')
+        A(f"  {prev} --> {nid}")
+        done.append(nid)
+        prev = nid
+
+    fid = f"{key}fail"
+    A(f'  {fid}["{_box(act_rows[fail_idx-1][0], fail_idx, "")}"]')
+    A(f"  {prev} --> {fid}")
+    vid = f"{key}v"
+    A(f'  {vid}{{"validation fails here"}}')
+    A(f"  {fid} --> {vid}")
+    rid = f"{key}rb"
+    A(f'  {rid}["ROLLBACK_REQUIRED = true"]')
+    A(f'  {vid} -- "fail" --> {rid}')
+
+    # The rollback runs as a horizontal lane off the failure, so you can read
+    # "this activity command failed -> these rollback commands, on these nodes"
+    # left to right. Only the steps that can execute are drawn; the ones a gate
+    # rules out are summarised, otherwise the lane is 27 boxes wide.
+    live = [(i, st, v) for i, st, v in plan if v != "SKIP"]
+    dead = [i for i, _st, v in plan if v == "SKIP"]
+
+    runs, deps = [], []
+    A(f'  subgraph {key}RB["ROLLBACK_CONFIGURATION &#183; '
+      f'{len(live)} of {len(plan)} steps execute"]')
+    A("    direction LR")
+    prev = None
+    for i, st, verdict in live:
+        nid = f"{key}r{i}"
+        suffix = "<br/><i>depends on node</i>" if verdict == "DEPENDS" else ""
+        A(f'    {nid}["{_box(st, i, "R")}{suffix}"]')
+        if prev:
+            A(f"    {prev} --> {nid}")
+        (runs if verdict == "RUN" else deps).append(nid)
+        prev = nid
+    A("  end")
+    A(f"  {rid} --> {key}RB")
+
+    if dead:
+        nums = ", ".join(f"R{n}" for n in dead)
+        A(f'  {key}sk["{len(dead)} steps skipped by a gate<br/>{clean(nums, 150)}"]')
+        A(f"  {rid} -.-> {key}sk")
+
+    A('  P(["POST_NODE_HEALTH_CHECK"])')
+    A(f"  {key}RB --> P")
+
+    A("  classDef ok fill:#e4f4ea,stroke:#1e7e45,color:#0e5227;")
+    A("  classDef failn fill:#fbe0de,stroke:#a93226,color:#6d1f18,stroke-width:2px;")
+    A("  classDef gate fill:#fdf3d8,stroke:#b7770d,color:#6b4708;")
+    A("  classDef arm fill:#fbf0dd,stroke:#b45309,color:#7a3a06,stroke-width:2px;")
+    A("  classDef run fill:#eaf0f7,stroke:#2a6099,color:#10243a;")
+    A("  classDef skip fill:#f0f1f3,stroke:#b9c2cc,color:#9aa6b2,stroke-dasharray:4 3;")
+    A("  classDef dep fill:#fdf7e8,stroke:#c9a24d,color:#6b5417,stroke-dasharray:4 3;")
+    A("  classDef term fill:#e7effa,stroke:#2a6099,color:#1c4470;")
+    if done:
+        A("  class " + ",".join(done) + " ok;")
+    A(f"  class {fid} failn;")
+    A(f"  class {vid} gate;")
+    A(f"  class {rid} arm;")
+    for names, cls in ((runs, "run"), (deps, "dep")):
+        if names:
+            A("  class " + ",".join(names) + f" {cls};")
+    if dead:
+        A(f"  class {key}sk skip;")
+    A("  class S,P term;")
+    return "\n".join(L)
+
+
+def mesh_diagram(act, rbk, points, plans):
+    """Complete mesh: every rollback-arming ACTIVITY command wired to every
+    ROLLBACK step it would actually call.
+
+    Returns (mermaid_source, index_map) where index_map tells the page which
+    edge indices and rollback nodes belong to each activity command, so one
+    can be isolated from the hairball on click.
+    """
+    L = []
+    A = L.append
+    A('%%{init:{"theme":"base","themeVariables":{'
+      '"fontFamily":"Segoe UI, system-ui, sans-serif","fontSize":"12px",'
+      '"primaryColor":"#eaf0f7","primaryTextColor":"#10243a",'
+      '"primaryBorderColor":"#2a6099","lineColor":"#b3c2d1",'
+      '"textColor":"#10243a","nodeTextColor":"#10243a",'
+      '"edgeLabelBackground":"#ffffff","mainBkg":"#eaf0f7",'
+      '"clusterBkg":"#f7fafd","clusterBorder":"#cdd9e6"}}}%%')
+    A("flowchart LR")
+
+    A('  subgraph MA["ACTIVITY commands that set ROLLBACK_REQUIRED = true"]')
+    A("    direction TB")
+    for idx in points:
+        st = act[idx - 1][0]
+        node = SHORT_NODE.get(str(st.get("node", "local")), str(st.get("node", "local")))
+        A(f'    A{idx}["<b>{idx}. {clean(node)}</b><br/>{wrap(clean(cmd_text(st)), 40, 2)}"]')
+    A("  end")
+
+    A('  subgraph MR["ROLLBACK_CONFIGURATION steps"]')
+    A("    direction TB")
+    for i, st, _v in plans[points[0]]:
+        node = SHORT_NODE.get(str(st.get("node", "local")), str(st.get("node", "local")))
+        A(f'    R{i}["<b>R{i}. {clean(node)}</b><br/>{wrap(clean(cmd_text(st)), 40, 2)}"]')
+    A("  end")
+
+    index, e = {}, 0
+    for idx in points:
+        edges, rnodes = [], []
+        for i, _st, v in plans[idx]:
+            if v == "SKIP":
+                continue
+            A(f"  A{idx} {'-->' if v == 'RUN' else '-.->'} R{i}")
+            edges.append(e)
+            rnodes.append(f"R{i}")
+            e += 1
+        index[str(idx)] = {"edges": edges, "rnodes": rnodes}
+
+    A("  classDef act fill:#fbe0de,stroke:#a93226,color:#6d1f18;")
+    A("  classDef rbs fill:#eaf0f7,stroke:#2a6099,color:#10243a;")
+    A("  class " + ",".join(f"A{i}" for i in points) + " act;")
+    A("  class " + ",".join(f"R{i}" for i, _s, _v in plans[points[0]]) + " rbs;")
+    return "\n".join(L), index
+
+
+def rollback_section(phases):
+    """HTML for the auto-rollback explorer."""
+    def rows_of(*names):
+        for pid, (p, rows) in phases.items():
+            if p.get("name") in names:
+                return rows
+        return []
+
+    pre = rows_of("PRE_NODE_HEALTH_CHECK")
+    bkp = rows_of("BACKUP")
+    act = rows_of("ACTIVITY_CONFIGURATION")
+    rbk = rows_of("ROLLBACK_CONFIGURATION")
+    if not act or not rbk:
+        return ""
+
+    gvars = ROLLBACK_GLOBALS.get("vars") or {}
+    points = arming_points(act)
+    scenarios, matrix, plans = [], [], {}
+
+    for n, idx in enumerate(points):
+        st = act[idx - 1][0]
+        state = simulate((pre, bkp), act, idx, gvars)
+        plan = rollback_plan(rbk, state)
+        plans[idx] = plan
+        key = f"sc{n}"
+        desc = str(st.get("command_description", ""))
+        cmd = cmd_text(st)
+        fail = ((st.get("validation") or {}).get("failure") or {}).get("message", "")
+        scenarios.append({
+            "key": key,
+            "idx": idx,
+            "cmd": plain(cmd, 78),
+            "cmd_full": plain(cmd),
+            "node": plain(SHORT_NODE.get(str(st.get("node", "local")), str(st.get("node", "local")))),
+            "desc": plain(desc, 74),
+            "why": clean(fail, 150),
+            "run": sum(1 for _i, _s, v in plan if v == "RUN"),
+            "dep": sum(1 for _i, _s, v in plan if v == "DEPENDS"),
+            "skip": sum(1 for _i, _s, v in plan if v == "SKIP"),
+            "mermaid": mixed_diagram(act, idx, rbk, plan, key),
+        })
+        matrix.append((idx, cmd, plan))
+
+    out = []
+    A = out.append
+    A('<section id="autorollback" class="phase">')
+    A('<div class="phead" role="button" tabindex="0" aria-expanded="true">'
+      '<span class="caret">&#9662;</span><h2>Auto-rollback explorer</h2>'
+      f'<span class="pcount">{len(points)} failure points</span>'
+      '<span class="phint">click to collapse</span></div>')
+    A('<div class="pbody">')
+    A('<p class="pdesc">Pick an ACTIVITY command that can arm a rollback. The graph shows the '
+      "activity path taken up to that command, the failure, and then only the "
+      "ROLLBACK_CONFIGURATION steps that would actually execute for that failure — the rest are "
+      "drawn dimmed. Which rollback steps run is computed from the workflow's own "
+      "<code>when</code> / <code>skip_when</code> gates against the variable state at the moment "
+      "of failure, not assumed.</p>")
+
+    A('<div class="scen">')
+    for i, sc in enumerate(scenarios):
+        A(f'<button class="scenbtn{" on" if i == 0 else ""}" data-sc="{sc["key"]}" '
+          f'title="{sc["cmd_full"]}">'
+          f'<span class="scl"><b>{sc["idx"]}.</b> <span class="scnode">{sc["node"]}</span> '
+          f'<code>{sc["cmd"]}</code></span>'
+          f'<span class="scd">{sc["desc"]}</span>'
+          f'<span class="scn"><b>{sc["run"]}</b> run · {sc["dep"]} depends · {sc["skip"]} skipped</span>'
+          "</button>")
+    A("</div>")
+
+    A('<div class="canvas" id="rbcanvas">')
+    A('<div class="toolbar">')
+    A('<button data-act="out" title="Zoom out">&minus;</button>')
+    A('<span class="zoom">100%</span>')
+    A('<button data-act="in" title="Zoom in">&plus;</button>')
+    A('<button data-act="fit">Fit</button>')
+    A('<button data-act="reset">100%</button>')
+    A('<button data-act="full">Fullscreen</button>')
+    A('<span class="spacer"></span>')
+    A('<span class="hint" id="rbwhy"></span>')
+    A("</div>")
+    A('<div class="viewport"><div class="stage"></div></div>')
+    A("</div>")
+
+    A('<div class="legend" style="margin-top:14px">'
+      '<span><i class="key k-ok"></i> activity step that already ran</span>'
+      '<span><i class="key k-stop"></i> the command that failed</span>'
+      '<span><i class="key k-cmd"></i> rollback step that runs</span>'
+      '<span><i class="key k-dep"></i> depends on what the node returns</span>'
+      '<span><i class="key k-skip"></i> skipped by a gate</span></div>')
+
+    # ---- coverage matrix ------------------------------------------------- #
+    A('<h2 style="margin-top:34px">Coverage matrix</h2>')
+    A('<p class="pdesc">Every arming point against every rollback step. '
+      "<b>&#9679;</b> runs &nbsp; <b>?</b> depends on the node &nbsp; "
+      '<span class="c-skip">&middot;</span> skipped.</p>')
+    A('<div class="matwrap"><table class="mat"><thead><tr>'
+      '<th class="rowhead">Activity command that failed</th>')
+    for i, rst, _v in matrix[0][2]:
+        A(f'<th title="R{i} &#183; {plain(cmd_text(rst))}">R{i}</th>')
+    A("</tr></thead><tbody>")
+    for idx, cmd, plan in matrix:
+        A(f'<tr><td class="rowhead" title="{plain(cmd)}">'
+          f'<b>{idx}.</b> <code>{plain(cmd, 76)}</code></td>')
+        for _i, _st, v in plan:
+            cls = {"RUN": "c-run", "DEPENDS": "c-dep", "SKIP": "c-skip"}[v]
+            sym = {"RUN": "&#9679;", "DEPENDS": "?", "SKIP": "&middot;"}[v]
+            A(f'<td class="{cls}">{sym}</td>')
+        A("</tr>")
+    A("</tbody></table></div>")
+
+    # R1..Rn are meaningless without their commands
+    A('<h3 class="keyhead">Rollback steps</h3>')
+    A('<ol class="rkey">')
+    for i, rst, _v in matrix[0][2]:
+        node = SHORT_NODE.get(str(rst.get("node", "local")), str(rst.get("node", "local")))
+        A(f'<li><span class="rn">R{i}</span><span class="rnode">{plain(node)}</span>'
+          f'<code>{plain(cmd_text(rst), 118)}</code></li>')
+    A("</ol>")
+
+    # ---- complete mesh ---------------------------------------------------- #
+    mesh_src, mesh_index = mesh_diagram(act, rbk, points, plans)
+    total_edges = sum(len(v["edges"]) for v in mesh_index.values())
+    A('<h2 style="margin-top:34px">Complete mesh</h2>')
+    A(f'<p class="pdesc">All {len(points)} rollback-arming ACTIVITY commands on the left, all '
+      f"{len(plans[points[0]])} ROLLBACK steps on the right, and every call between them — "
+      f"<b>{total_edges} edges</b>. A solid edge is a step that runs; a dotted edge is one whose "
+      "gate depends on what the node returns. No edge means that step is never called for that "
+      "failure. <b>Click any command to isolate it</b>; click it again, or the background, to "
+      "show the whole mesh.</p>")
+    A('<div class="canvas" id="meshcanvas">')
+    A('<div class="toolbar">')
+    A('<button data-act="out" title="Zoom out">&minus;</button>')
+    A('<span class="zoom">100%</span>')
+    A('<button data-act="in" title="Zoom in">&plus;</button>')
+    A('<button data-act="fit">Fit</button>')
+    A('<button data-act="reset">100%</button>')
+    A('<button data-act="full">Fullscreen</button>')
+    A('<span class="spacer"></span>')
+    A('<span class="hint" id="meshwhy">click a command on the left to isolate its rollback</span>')
+    A("</div>")
+    A('<div class="viewport"><div class="stage"><pre class="mermaid">')
+    A(mesh_src)
+    A("</pre></div></div>")
+    A("</div>")
+    A('<script type="application/json" id="meshdata">')
+    A(json.dumps(mesh_index))
+    A("</script>")
+
+    A('<script type="application/json" id="rbdata">')
+    A(json.dumps({s["key"]: {"m": s["mermaid"], "why": s["why"]} for s in scenarios}))
+    A("</script>")
+    A("</div>")        # /.pbody
+    A("</section>")
+    return "\n".join(out)
+
+
 STYLE = """<style>
 :root{
   --ink:#16222e; --dim:#6b7c8d; --ground:#eef1f5; --panel:#fff; --rule:#dbe3ec;
@@ -334,9 +847,32 @@ h1{margin:0 0 5px;font-size:24px;font-weight:600;letter-spacing:-.01em;}
 .rail a:hover{background:var(--accent-soft);border-color:var(--rule);}
 .rail a:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
 .rail a i{font-style:normal;color:var(--dim);font-weight:500;}
+.rail a.navmark{margin-left:auto;background:var(--accent);color:#fff;
+ border-color:var(--accent);}
+.rail a.navmark:hover{background:var(--accent-deep);border-color:var(--accent-deep);}
+.rail a.navmark i{color:rgba(255,255,255,.75);}
 
 .main{padding-bottom:60px;}
 section{margin-top:32px;scroll-margin-top:56px;}
+
+/* ---- collapsible phases -------------------------------------------------- */
+.phead{display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none;
+ padding:6px 10px;margin:0 -10px 6px;border-radius:8px;}
+.phead:hover{background:var(--panel);}
+.phead:focus-visible{outline:2px solid var(--accent);outline-offset:1px;}
+.phead h2{margin:0;}
+.caret{color:var(--accent);font-size:13px;line-height:1;transition:transform .15s;}
+.pcount{font-size:11.5px;color:var(--dim);font-variant-numeric:tabular-nums;}
+.phint{font-size:11px;color:var(--dim);opacity:0;margin-left:auto;}
+.phead:hover .phint{opacity:1;}
+section.collapsed .caret{transform:rotate(-90deg);}
+section.collapsed .pbody{display:none;}
+section.collapsed .phead{background:var(--panel);border:1px solid var(--rule);}
+.allbtn{font-family:var(--sans);font-size:11.5px;font-weight:600;cursor:pointer;
+ color:var(--accent);background:transparent;border:1px solid var(--rule);
+ border-radius:6px;padding:4px 10px;}
+.allbtn:hover{background:var(--accent-soft);border-color:var(--accent);}
+.allbtn:focus-visible{outline:2px solid var(--accent);outline-offset:1px;}
 h2{font-size:14px;letter-spacing:.09em;text-transform:uppercase;color:var(--accent);
  margin:0 0 4px;font-weight:700;}
 .pdesc{color:var(--dim);margin:0 0 12px;max-width:84ch;}
@@ -466,6 +1002,63 @@ code{font-family:var(--mono);font-size:12.5px;background:var(--code-bg);
 .k-gate{background:#fdf3d8;border-color:#b7770d;}
 .k-rb{background:#fbf0dd;border-color:#b45309;}
 .k-stop{background:#fbe0de;border-color:#a93226;}
+.k-ok{background:#e4f4ea;border-color:#1e7e45;}
+.k-dep{background:#fdf7e8;border-color:#c9a24d;}
+.k-skip{background:#f0f1f3;border-color:#b9c2cc;}
+
+/* ---- auto-rollback explorer --------------------------------------------- */
+.scen{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));
+ gap:8px;margin:0 0 14px;}
+.scenbtn{display:flex;flex-direction:column;gap:3px;align-items:flex-start;
+ text-align:left;font-family:var(--sans);background:var(--panel);
+ border:1px solid var(--rule);border-radius:8px;padding:9px 12px;cursor:pointer;
+ color:var(--ink);}
+.scenbtn:hover{border-color:var(--accent);background:var(--accent-soft);}
+.scenbtn.on{border-color:var(--accent);border-left:4px solid var(--accent);
+ background:var(--accent-soft);}
+.scenbtn:focus-visible{outline:2px solid var(--accent);outline-offset:1px;}
+.scenbtn .scl{font-size:12.5px;font-weight:600;line-height:1.4;}
+.scenbtn .scl code{font-family:var(--mono);font-size:11.5px;background:transparent;
+ color:var(--ink);padding:0;font-weight:400;}
+.scenbtn.on .scl code{color:var(--accent-deep);}
+.scnode{font-family:var(--mono);font-size:10.5px;color:var(--accent);
+ background:var(--accent-soft);border-radius:3px;padding:0 4px;}
+.scenbtn .scd{font-size:11.5px;color:var(--dim);line-height:1.35;}
+.keyhead{font-size:12px;letter-spacing:.08em;text-transform:uppercase;
+ color:var(--dim);font-weight:700;margin:22px 0 8px;}
+ol.rkey{list-style:none;margin:0;padding:0;display:grid;
+ grid-template-columns:repeat(auto-fill,minmax(430px,1fr));gap:3px 18px;}
+ol.rkey li{display:flex;align-items:baseline;gap:8px;font-size:12px;
+ padding:3px 0;border-bottom:1px solid var(--rule);}
+.rn{font-family:var(--mono);font-size:11px;font-weight:700;color:var(--accent);
+ min-width:30px;}
+.rnode{font-family:var(--mono);font-size:10.5px;color:var(--dim);min-width:62px;}
+ol.rkey code{font-family:var(--mono);font-size:11px;background:transparent;
+ color:var(--ink);padding:0;word-break:break-all;}
+.scenbtn .scn{font-size:11.5px;color:var(--dim);font-variant-numeric:tabular-nums;}
+.scenbtn .scn b{color:var(--accent);}
+.matwrap{overflow:auto;max-height:520px;border:1px solid var(--rule);
+ border-radius:8px;background:var(--panel);}
+table.mat{border-collapse:collapse;font-size:12px;width:100%;}
+table.mat th{position:sticky;top:0;z-index:2;background:var(--panel);
+ color:var(--dim);font-size:10px;font-weight:700;padding:6px 3px;
+ border-bottom:1px solid var(--rule);text-align:center;}
+table.mat td{padding:5px 3px;text-align:center;border-bottom:1px solid var(--rule);
+ font-size:13px;line-height:1;}
+table.mat .rowhead{text-align:left;font-size:11.5px;padding:5px 10px;
+ white-space:nowrap;color:var(--ink);position:sticky;left:0;z-index:1;
+ background:var(--panel);border-right:1px solid var(--rule);}
+table.mat th.rowhead{color:var(--dim);z-index:3;}
+/* mesh: dim everything except the isolated command's calls */
+#meshcanvas .stage svg g.node{cursor:pointer;}
+#meshcanvas .stage svg.isolated .edgePaths path{opacity:.05;}
+#meshcanvas .stage svg.isolated .edgePaths path.lit{opacity:1;stroke:#a93226;
+ stroke-width:2px;}
+#meshcanvas .stage svg.isolated g.node{opacity:.18;}
+#meshcanvas .stage svg.isolated g.node.lit{opacity:1;}
+.c-run{color:#1e7e45;}
+.c-dep{color:#b7770d;font-weight:700;}
+.c-skip{color:#b9c2cc;}
 footer{margin-top:40px;padding-top:16px;border-top:1px solid var(--rule);
  font-size:12.5px;color:var(--dim);}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;}}
@@ -785,9 +1378,151 @@ PANZOOM = """<script>
 
     open();
     window.addEventListener('resize', drawMinimap);
+    // exposed so a canvas whose content is swapped in later can re-open + re-index
+    canvas.__pz = { fit: fit, open: open,
+                    refresh: function () { open(); drawMinimap(); } };
   }
 
-  function start() { document.querySelectorAll('.canvas').forEach(setup); }
+  /* ---- auto-rollback explorer ------------------------------------------- */
+  function rollback() {
+    var holder = document.getElementById('rbdata');
+    var canvas = document.getElementById('rbcanvas');
+    if (!holder || !canvas || !window.mermaid) return;
+    var data;
+    try { data = JSON.parse(holder.textContent); } catch (e) { return; }
+    var stage = canvas.querySelector('.stage');
+    var why = document.getElementById('rbwhy');
+    var seq = 0;
+
+    function show(key, btn) {
+      var sc = data[key];
+      if (!sc) return;
+      document.querySelectorAll('.scenbtn').forEach(function (b) {
+        b.classList.toggle('on', b === btn);
+      });
+      if (why) why.textContent = sc.why || '';
+      stage.innerHTML = '<div style="padding:16px;color:#5b6b7c">rendering…</div>';
+      mermaid.render('rbsvg' + (seq++), sc.m).then(function (r) {
+        stage.innerHTML = r.svg;
+        if (canvas.__pz) canvas.__pz.refresh();
+      }).catch(function (e) {
+        stage.innerHTML = '<div style="padding:16px;color:#a93226">could not render: '
+          + String((e && e.message) || e) + '</div>';
+        console.error('rollback diagram failed', e);
+      });
+    }
+
+    var buttons = document.querySelectorAll('.scenbtn');
+    buttons.forEach(function (b) {
+      b.addEventListener('click', function () { show(b.getAttribute('data-sc'), b); });
+    });
+    if (buttons.length) show(buttons[0].getAttribute('data-sc'), buttons[0]);
+  }
+
+  /* ---- collapsible phases ----------------------------------------------- */
+  function collapsing() {
+    function setState(sec, collapsed) {
+      sec.classList.toggle('collapsed', collapsed);
+      var head = sec.querySelector('.phead');
+      if (head) head.setAttribute('aria-expanded', String(!collapsed));
+      var hint = sec.querySelector('.phint');
+      if (hint) hint.textContent = collapsed ? 'click to expand' : 'click to collapse';
+      if (!collapsed) {
+        // it was laid out at zero size while hidden - measure and re-fit now
+        sec.querySelectorAll('.canvas').forEach(function (c) {
+          if (c.__pz) setTimeout(function () { c.__pz.refresh(); }, 0);
+        });
+      }
+    }
+    document.querySelectorAll('section.phase').forEach(function (sec) {
+      var head = sec.querySelector('.phead');
+      if (!head) return;
+      head.addEventListener('click', function () {
+        setState(sec, !sec.classList.contains('collapsed'));
+      });
+      head.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          setState(sec, !sec.classList.contains('collapsed'));
+        }
+      });
+    });
+    function all(collapsed) {
+      document.querySelectorAll('section.phase').forEach(function (sec) {
+        setState(sec, collapsed);
+      });
+    }
+    var c = document.getElementById('collapseAll');
+    var x = document.getElementById('expandAll');
+    if (c) c.addEventListener('click', function () { all(true); });
+    if (x) x.addEventListener('click', function () { all(false); });
+
+    // opening a section from the nav must expand it first
+    document.querySelectorAll('.rail a[href^="#"]').forEach(function (a) {
+      a.addEventListener('click', function () {
+        var sec = document.querySelector(a.getAttribute('href'));
+        if (sec && sec.classList.contains('collapsed')) setState(sec, false);
+      });
+    });
+  }
+
+  /* ---- complete mesh: click a command to isolate its rollback ----------- */
+  function mesh() {
+    var holder = document.getElementById('meshdata');
+    var canvas = document.getElementById('meshcanvas');
+    if (!holder || !canvas) return;
+    var map;
+    try { map = JSON.parse(holder.textContent); } catch (e) { return; }
+    var stage = canvas.querySelector('.stage');
+    var why = document.getElementById('meshwhy');
+    var svg = stage.querySelector('svg');
+    if (!svg) return;
+
+    var edges = svg.querySelectorAll('.edgePaths path, g.edgePaths > path');
+    var current = null;
+
+    function clear() {
+      current = null;
+      svg.classList.remove('isolated');
+      edges.forEach(function (p) { p.classList.remove('lit'); });
+      svg.querySelectorAll('g.node').forEach(function (n) { n.classList.remove('lit'); });
+      if (why) why.textContent = 'click a command on the left to isolate its rollback';
+    }
+
+    function isolate(actId, gnode) {
+      var d = map[actId];
+      if (!d) return;
+      if (current === actId) { clear(); return; }
+      clear();
+      current = actId;
+      svg.classList.add('isolated');
+      d.edges.forEach(function (i) { if (edges[i]) edges[i].classList.add('lit'); });
+      if (gnode) gnode.classList.add('lit');
+      svg.querySelectorAll('g.node').forEach(function (n) {
+        var id = (n.id || '').replace(/^flowchart-/, '').replace(/-\\d+$/, '');
+        if (d.rnodes.indexOf(id) >= 0) n.classList.add('lit');
+      });
+      if (why) {
+        why.textContent = 'activity command ' + actId + ' → ' + d.rnodes.length
+          + ' rollback steps: ' + d.rnodes.join(', ');
+      }
+    }
+
+    stage.addEventListener('click', function (e) {
+      var g = e.target.closest('g.node');
+      if (!g) { clear(); return; }
+      var id = (g.id || '').replace(/^flowchart-/, '').replace(/-\\d+$/, '');
+      var m = /^A(\\d+)$/.exec(id);
+      if (m) isolate(m[1], g); else clear();
+    });
+  }
+
+  function start() {
+    document.querySelectorAll('.canvas').forEach(setup);
+    rollback();
+    collapsing();
+    mesh();
+  }
 
   if (window.mermaid) {
     mermaid.initialize({ startOnLoad: false, securityLevel: 'loose',
@@ -824,6 +1559,8 @@ def main():
     default_on_failure = (((doc.get("globals") or {}).get("defaults") or {})
                           .get("on_failure") or "stop")
 
+    ROLLBACK_GLOBALS.update(doc.get("globals") or {})
+
     phases = OrderedDict()
     for pid, p in (doc.get("phases") or {}).items():
         if isinstance(p, dict):
@@ -849,6 +1586,14 @@ def main():
     A('<nav class="rail"><div class="wrap">')
     for pid, (p, rows) in phases.items():
         A(f'<a href="#{pid}">{html.escape(p.get("name", pid))} <i>{len(rows)}</i></a>')
+    # the explorer sits below five tall canvases - it needs its own way in
+    n_arm = len(arming_points(next((rows for _pid, (p, rows) in phases.items()
+                                    if p.get("name") == "ACTIVITY_CONFIGURATION"), [])))
+    if n_arm:
+        A(f'<a href="#autorollback" class="navmark">&#8630; Auto-rollback explorer '
+          f"<i>{n_arm}</i></a>")
+    A('<button class="allbtn" id="collapseAll">Collapse all</button>')
+    A('<button class="allbtn" id="expandAll">Expand all</button>')
     A("</div></nav>")
 
     A('<div class="wrap main">')
@@ -861,7 +1606,13 @@ def main():
 
     for pid, (p, rows) in phases.items():
         pname = p.get("name", pid)
-        A(f'<section id="{pid}"><h2>{html.escape(pname)}</h2>')
+        A(f'<section id="{pid}" class="phase">')
+        A('<div class="phead" role="button" tabindex="0" aria-expanded="true">'
+          '<span class="caret">&#9662;</span>'
+          f'<h2>{html.escape(pname)}</h2>'
+          f'<span class="pcount">{len(rows)} commands</span>'
+          '<span class="phint">click to collapse</span></div>')
+        A('<div class="pbody">')
         if p.get("description"):
             A(f'<p class="pdesc">{html.escape(str(p["description"]))}</p>')
         A('<div class="gate">')
@@ -899,8 +1650,12 @@ def main():
         A('<p class="hint-row">click any command for its full detail · drag to pan · '
           "scroll to zoom · <kbd>/</kbd> find · <kbd>f</kbd> fit · <kbd>0</kbd> 100% · "
           "<kbd>Esc</kbd> clear</p>")
-        A("</div></section>")
+        A("</div>")        # /.canvas
+        A("</div>")        # /.pbody
+        A("</section>")
         info.update(step_info(rows, pid, default_on_failure))
+
+    A(rollback_section(phases))
 
     A(f'<footer>Generated from <code>{html.escape(src)}</code> · {total} commands · '
       "re-run gen_command_diagram.py after any YAML change.</footer>")

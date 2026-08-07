@@ -137,6 +137,44 @@ python gen_command_reference.py $yaml "$($name)_COMMAND_REFERENCE.html"
 
 
 ===============================================================================
+ AUTO-ROLLBACK EXPLORER  (bottom of the diagram page)
+===============================================================================
+
+ Answers: "if THIS activity command fails, which rollback steps actually run?"
+
+ Every ACTIVITY command whose failure sets ROLLBACK_REQUIRED=true becomes a
+ button. Click one and you get a single graph: the activity path taken up to
+ that command, the failure, then the rollback - with each rollback step drawn
+ as it would really behave:
+
+   solid blue    the step runs
+   dashed amber  depends on what the node returns at runtime
+   dashed grey   skipped by a when / skip_when gate
+
+ This is COMPUTED, not drawn by hand. The generator walks PRE + BACKUP +
+ ACTIVITY applying each step's variable assignments, applies the failure branch
+ at the chosen command, then evaluates every rollback step's gates against that
+ state using three-valued logic. A gate that depends on a live value (a captured
+ version string, a checksum comparison) is reported as "depends" - never guessed.
+
+ The coverage matrix underneath shows all failure points at once:
+     round dot = runs      ?  = depends on the node      .  = skipped
+
+ What it shows for DPA_DLU_INSTALLATION.yaml:
+
+   failure at activity 16-23  -> 16 rollback steps skipped. The whole ACTIVE
+                                 node tail (R14-R27) never runs, because
+                                 ROLLBACK_REQUIRED_NODE2 is only set at
+                                 activity step 24. Correct: the active node had
+                                 not been modified yet.
+   failure at activity 24-25  -> 10 skipped, the active node tail engages.
+   failure at activity 26-29  ->  7 skipped, the fullest rollback.
+
+ Same logic explains why a ROLLBACK_ONLY=true run rolls back the standby node
+ only: ACTIVITY never runs, so ROLLBACK_REQUIRED_NODE2 is never set.
+
+
+===============================================================================
  WHAT THE DIAGRAM SHOWS
 ===============================================================================
 
