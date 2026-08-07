@@ -108,12 +108,84 @@ code{font-family:var(--mono);font-size:12.5px;background:var(--code-bg);
 .stage svg .nodeLabel,.stage svg .edgeLabel,.stage svg .label,
 .stage svg text,.stage svg span,.stage svg p{color:#10243a!important;
  fill:#10243a!important;}
-.stage svg .edgeLabel{background:#fff!important;}
+.stage svg .edgeLabel{background:transparent!important;}
 .stage svg .edgeLabel rect{fill:#fff!important;opacity:1!important;}
-.stage svg .edgeLabel foreignObject div{background:#fff;padding:0 3px;
- border-radius:3px;}
+
+/* Mermaid measures each label, sizes a foreignObject to that measurement, then
+   clips anything outside it. Bold runs (<b>) and any padding we add afterwards
+   render WIDER than what was measured, so the last glyph was being sliced off -
+   "fail" showed as "fai", "5. node1" as "5. node". Letting the foreignObject
+   overflow costs nothing visually and ends the clipping. */
+.stage svg foreignObject{overflow:visible!important;}
+.stage svg .nodeLabel,.stage svg .edgeLabel,
+.stage svg .nodeLabel div,.stage svg .edgeLabel div{overflow:visible!important;}
+.stage svg .edgeLabel foreignObject div{background:#fff;border-radius:3px;
+ /* visual breathing room that does NOT widen the measured box */
+ box-shadow:0 0 0 3px #fff;}
 .stage svg .nodeLabel b{font-weight:700;}
 .stage svg .nodeLabel i{font-style:italic;opacity:.75;}
+
+/* --- highlight / dim states driven by search and selection --------------- */
+.stage svg g.node,.stage svg g.edgeLabel,.stage svg .edgePath{transition:opacity .12s;}
+.stage.filtering svg g.node,.stage.filtering svg .edgePath,
+.stage.filtering svg g.edgeLabel{opacity:.13;}
+.stage.filtering svg g.node.hit{opacity:1;}
+.stage svg g.node.hit rect,.stage svg g.node.hit polygon{stroke-width:3px!important;}
+.stage svg g.node.picked rect,.stage svg g.node.picked polygon{
+ stroke:#b02a6b!important;stroke-width:3.5px!important;}
+.stage svg g.node{cursor:pointer;}
+
+/* --- search box in the toolbar ------------------------------------------- */
+.toolbar input.find{font-family:var(--sans);font-size:12.5px;color:var(--ink);
+ background:var(--panel);border:1px solid var(--rule);border-radius:6px;
+ padding:4px 9px;width:170px;}
+.toolbar input.find:focus{outline:2px solid var(--accent);outline-offset:1px;
+ border-color:var(--accent);}
+.toolbar .found{font-size:11.5px;color:var(--dim);min-width:64px;
+ font-variant-numeric:tabular-nums;}
+.toolbar button.on{background:var(--accent);border-color:var(--accent);color:#fff;}
+
+/* --- minimap -------------------------------------------------------------- */
+.minimap{position:absolute;right:12px;bottom:12px;width:168px;height:126px;
+ background:rgba(255,255,255,.94);border:1px solid var(--rule);border-radius:8px;
+ box-shadow:var(--shadow);overflow:hidden;cursor:pointer;z-index:5;}
+.minimap.hidden{display:none;}
+.minimap svg{width:100%;height:100%;display:block;}
+.minimap .mmview{position:absolute;border:2px solid var(--accent);
+ background:rgba(42,96,153,.12);pointer-events:none;border-radius:2px;}
+
+/* --- step detail drawer --------------------------------------------------- */
+.drawer{position:absolute;top:0;right:0;width:340px;max-width:86%;height:100%;
+ background:var(--panel);border-left:1px solid var(--rule);box-shadow:var(--shadow);
+ transform:translateX(102%);transition:transform .18s ease;z-index:8;
+ display:flex;flex-direction:column;}
+.drawer.open{transform:none;}
+.drawer header{display:flex;align-items:center;gap:8px;padding:10px 12px;
+ border-bottom:1px solid var(--rule);}
+.drawer header .n{font-family:var(--mono);font-size:11.5px;font-weight:700;
+ background:var(--accent);color:#fff;border-radius:4px;padding:2px 7px;}
+.drawer header .t{flex:1;font-weight:600;font-size:13px;}
+.drawer header button{border:1px solid var(--rule);background:transparent;
+ color:var(--ink);border-radius:6px;cursor:pointer;padding:2px 8px;font-size:14px;}
+.drawer .body{padding:12px;overflow:auto;font-size:13px;}
+.drawer h5{margin:14px 0 4px;font-size:10.5px;letter-spacing:.09em;
+ text-transform:uppercase;color:var(--dim);}
+.drawer h5:first-child{margin-top:0;}
+.drawer pre{font-family:var(--mono);font-size:12px;background:var(--code-bg);
+ color:var(--code-ink);padding:9px 10px;border-radius:6px;margin:0;
+ white-space:pre-wrap;word-break:break-word;}
+.drawer .kv{color:var(--dim);}
+.drawer .kv b{color:var(--ink);font-weight:600;}
+.drawer .tag{display:inline-block;font-size:10px;font-weight:700;padding:2px 7px;
+ border-radius:20px;text-transform:uppercase;letter-spacing:.04em;}
+.tag-stop{background:rgba(169,50,38,.14);color:#a93226;}
+.tag-rb{background:rgba(180,83,9,.16);color:#b45309;}
+.tag-cont{background:rgba(30,126,69,.14);color:#1e7e45;}
+
+.hint-row{margin:8px 2px 0;font-size:12px;color:var(--dim);}
+.hint-row kbd{font-family:var(--mono);font-size:11px;background:var(--code-bg);
+ color:var(--code-ink);border:1px solid var(--rule);border-bottom-width:2px;
+ border-radius:4px;padding:0 5px;}
 
 .legend{display:flex;flex-wrap:wrap;gap:9px 22px;margin:16px 0 0;font-size:13.5px;
  color:var(--dim);}
@@ -153,16 +225,20 @@ footer{margin-top:40px;padding-top:16px;border-top:1px solid var(--rule);
 <span><b>on_failure</b> <code>stop</code></span>
 <span><b>commands</b> 4</span>
 </div>
-<div class="canvas">
+<div class="canvas" data-name="PRE_NODE_HEALTH_CHECK">
 <div class="toolbar">
-<button data-act="out" title="Zoom out">&minus;</button>
+<button data-act="out" title="Zoom out (-)">&minus;</button>
 <span class="zoom">100%</span>
-<button data-act="in" title="Zoom in">&plus;</button>
-<button data-act="fit" title="Fit to window">Fit</button>
-<button data-act="reset" title="Actual size">100%</button>
-<button data-act="full" title="Fullscreen">Fullscreen</button>
+<button data-act="in" title="Zoom in (+)">&plus;</button>
+<button data-act="fit" title="Fit to window (f)">Fit</button>
+<button data-act="reset" title="Actual size (0)">100%</button>
+<input class="find" type="search" placeholder="Find a command  /" aria-label="Find a command">
+<span class="found"></span>
 <span class="spacer"></span>
-<span class="hint">drag to pan · scroll to zoom · double-click to fit</span>
+<button data-act="map" class="on" title="Toggle minimap">Map</button>
+<button data-act="svg" title="Download this phase as SVG">SVG</button>
+<button data-act="png" title="Download this phase as PNG">PNG</button>
+<button data-act="full" title="Fullscreen">Fullscreen</button>
 </div>
 <div class="viewport"><div class="stage"><pre class="mermaid">
 %%{init:{"theme":"base","themeVariables":{"fontFamily":"Segoe UI, system-ui, sans-serif","fontSize":"13px","primaryColor":"#eaf0f7","primaryTextColor":"#10243a","primaryBorderColor":"#2a6099","lineColor":"#8095ab","textColor":"#10243a","nodeTextColor":"#10243a","edgeLabelBackground":"#ffffff","labelBackground":"#ffffff","tertiaryColor":"#ffffff","mainBkg":"#eaf0f7","clusterBkg":"#ffffff"}}}%%
@@ -203,7 +279,11 @@ flowchart TD
   class preNodeHealthCheck_1f,preNodeHealthCheck_3f warn;
   class preNodeHealthCheck_4f stopn;
   class START,END term;
-</pre></div></div>
+</pre></div>
+<div class="minimap"><div class="mmview"></div></div>
+<aside class="drawer"><header><span class="n"></span><span class="t"></span><button title="Close">&times;</button></header><div class="body"></div></aside>
+</div>
+<p class="hint-row">click any command for its full detail · drag to pan · scroll to zoom · <kbd>/</kbd> find · <kbd>f</kbd> fit · <kbd>0</kbd> 100% · <kbd>Esc</kbd> clear</p>
 </div></section>
 <section id="backup"><h2>BACKUP</h2>
 <p class="pdesc">Full NETCONF backup of SBC signaling and media plane configurations</p>
@@ -211,16 +291,20 @@ flowchart TD
 <span><b>phase runs when</b> <code>${ROLLBACK_ONLY != &quot;true&quot;}</code></span>
 <span><b>commands</b> 28</span>
 </div>
-<div class="canvas">
+<div class="canvas" data-name="BACKUP">
 <div class="toolbar">
-<button data-act="out" title="Zoom out">&minus;</button>
+<button data-act="out" title="Zoom out (-)">&minus;</button>
 <span class="zoom">100%</span>
-<button data-act="in" title="Zoom in">&plus;</button>
-<button data-act="fit" title="Fit to window">Fit</button>
-<button data-act="reset" title="Actual size">100%</button>
-<button data-act="full" title="Fullscreen">Fullscreen</button>
+<button data-act="in" title="Zoom in (+)">&plus;</button>
+<button data-act="fit" title="Fit to window (f)">Fit</button>
+<button data-act="reset" title="Actual size (0)">100%</button>
+<input class="find" type="search" placeholder="Find a command  /" aria-label="Find a command">
+<span class="found"></span>
 <span class="spacer"></span>
-<span class="hint">drag to pan · scroll to zoom · double-click to fit</span>
+<button data-act="map" class="on" title="Toggle minimap">Map</button>
+<button data-act="svg" title="Download this phase as SVG">SVG</button>
+<button data-act="png" title="Download this phase as PNG">PNG</button>
+<button data-act="full" title="Fullscreen">Fullscreen</button>
 </div>
 <div class="viewport"><div class="stage"><pre class="mermaid">
 %%{init:{"theme":"base","themeVariables":{"fontFamily":"Segoe UI, system-ui, sans-serif","fontSize":"13px","primaryColor":"#eaf0f7","primaryTextColor":"#10243a","primaryBorderColor":"#2a6099","lineColor":"#8095ab","textColor":"#10243a","nodeTextColor":"#10243a","edgeLabelBackground":"#ffffff","labelBackground":"#ffffff","tertiaryColor":"#ffffff","mainBkg":"#eaf0f7","clusterBkg":"#ffffff"}}}%%
@@ -422,7 +506,11 @@ flowchart TD
   class backup_3f,backup_8f,backup_9f,backup_10f,backup_12f,backup_13f,backup_15f,backup_18f,backup_19f,backup_20f,backup_22f,backup_25f,backup_26f,backup_27f warn;
   class backup_4f,backup_7f,backup_11f,backup_14f,backup_17f,backup_21f,backup_24f,backup_28f stopn;
   class START,END term;
-</pre></div></div>
+</pre></div>
+<div class="minimap"><div class="mmview"></div></div>
+<aside class="drawer"><header><span class="n"></span><span class="t"></span><button title="Close">&times;</button></header><div class="body"></div></aside>
+</div>
+<p class="hint-row">click any command for its full detail · drag to pan · scroll to zoom · <kbd>/</kbd> find · <kbd>f</kbd> fit · <kbd>0</kbd> 100% · <kbd>Esc</kbd> clear</p>
 </div></section>
 <section id="activity_configuration"><h2>ACTIVITY_CONFIGURATION</h2>
 <p class="pdesc">Generate NETCONF XML change-sets from CIQ JSON, then for each table: download current config, merge changes, transfer merged XML to SBC, and execute via netconfprov.
@@ -431,16 +519,20 @@ flowchart TD
 <span><b>phase runs when</b> <code>${ROLLBACK_ONLY != &quot;true&quot;}</code></span>
 <span><b>commands</b> 27</span>
 </div>
-<div class="canvas">
+<div class="canvas" data-name="ACTIVITY_CONFIGURATION">
 <div class="toolbar">
-<button data-act="out" title="Zoom out">&minus;</button>
+<button data-act="out" title="Zoom out (-)">&minus;</button>
 <span class="zoom">100%</span>
-<button data-act="in" title="Zoom in">&plus;</button>
-<button data-act="fit" title="Fit to window">Fit</button>
-<button data-act="reset" title="Actual size">100%</button>
-<button data-act="full" title="Fullscreen">Fullscreen</button>
+<button data-act="in" title="Zoom in (+)">&plus;</button>
+<button data-act="fit" title="Fit to window (f)">Fit</button>
+<button data-act="reset" title="Actual size (0)">100%</button>
+<input class="find" type="search" placeholder="Find a command  /" aria-label="Find a command">
+<span class="found"></span>
 <span class="spacer"></span>
-<span class="hint">drag to pan · scroll to zoom · double-click to fit</span>
+<button data-act="map" class="on" title="Toggle minimap">Map</button>
+<button data-act="svg" title="Download this phase as SVG">SVG</button>
+<button data-act="png" title="Download this phase as PNG">PNG</button>
+<button data-act="full" title="Fullscreen">Fullscreen</button>
 </div>
 <div class="viewport"><div class="stage"><pre class="mermaid">
 %%{init:{"theme":"base","themeVariables":{"fontFamily":"Segoe UI, system-ui, sans-serif","fontSize":"13px","primaryColor":"#eaf0f7","primaryTextColor":"#10243a","primaryBorderColor":"#2a6099","lineColor":"#8095ab","textColor":"#10243a","nodeTextColor":"#10243a","edgeLabelBackground":"#ffffff","labelBackground":"#ffffff","tertiaryColor":"#ffffff","mainBkg":"#eaf0f7","clusterBkg":"#ffffff"}}}%%
@@ -632,7 +724,11 @@ flowchart TD
   class activity_configuration_2f,activity_configuration_3f,activity_configuration_4f,activity_configuration_5f,activity_configuration_6f,activity_configuration_7f,activity_configuration_8f,activity_configuration_9f,activity_configuration_10f,activity_configuration_11f,activity_configuration_12f,activity_configuration_13f,activity_configuration_14f,activity_configuration_15f,activity_configuration_24f,activity_configuration_27f rb;
   class activity_configuration_1f,activity_configuration_16f,activity_configuration_17f,activity_configuration_20f stopn;
   class START,END term;
-</pre></div></div>
+</pre></div>
+<div class="minimap"><div class="mmview"></div></div>
+<aside class="drawer"><header><span class="n"></span><span class="t"></span><button title="Close">&times;</button></header><div class="body"></div></aside>
+</div>
+<p class="hint-row">click any command for its full detail · drag to pan · scroll to zoom · <kbd>/</kbd> find · <kbd>f</kbd> fit · <kbd>0</kbd> 100% · <kbd>Esc</kbd> clear</p>
 </div></section>
 <section id="postNodeHealthCheck"><h2>POST_NODE_HEALTH_CHECK</h2>
 <p class="pdesc">Verify SBC node health after configuration - compare with pre-health baseline</p>
@@ -641,16 +737,20 @@ flowchart TD
 <span><b>on_failure</b> <code>stop</code></span>
 <span><b>commands</b> 4</span>
 </div>
-<div class="canvas">
+<div class="canvas" data-name="POST_NODE_HEALTH_CHECK">
 <div class="toolbar">
-<button data-act="out" title="Zoom out">&minus;</button>
+<button data-act="out" title="Zoom out (-)">&minus;</button>
 <span class="zoom">100%</span>
-<button data-act="in" title="Zoom in">&plus;</button>
-<button data-act="fit" title="Fit to window">Fit</button>
-<button data-act="reset" title="Actual size">100%</button>
-<button data-act="full" title="Fullscreen">Fullscreen</button>
+<button data-act="in" title="Zoom in (+)">&plus;</button>
+<button data-act="fit" title="Fit to window (f)">Fit</button>
+<button data-act="reset" title="Actual size (0)">100%</button>
+<input class="find" type="search" placeholder="Find a command  /" aria-label="Find a command">
+<span class="found"></span>
 <span class="spacer"></span>
-<span class="hint">drag to pan · scroll to zoom · double-click to fit</span>
+<button data-act="map" class="on" title="Toggle minimap">Map</button>
+<button data-act="svg" title="Download this phase as SVG">SVG</button>
+<button data-act="png" title="Download this phase as PNG">PNG</button>
+<button data-act="full" title="Fullscreen">Fullscreen</button>
 </div>
 <div class="viewport"><div class="stage"><pre class="mermaid">
 %%{init:{"theme":"base","themeVariables":{"fontFamily":"Segoe UI, system-ui, sans-serif","fontSize":"13px","primaryColor":"#eaf0f7","primaryTextColor":"#10243a","primaryBorderColor":"#2a6099","lineColor":"#8095ab","textColor":"#10243a","nodeTextColor":"#10243a","edgeLabelBackground":"#ffffff","labelBackground":"#ffffff","tertiaryColor":"#ffffff","mainBkg":"#eaf0f7","clusterBkg":"#ffffff"}}}%%
@@ -691,23 +791,31 @@ flowchart TD
   class postNodeHealthCheck_1v,postNodeHealthCheck_3v,postNodeHealthCheck_4v gate;
   class postNodeHealthCheck_1f,postNodeHealthCheck_3f,postNodeHealthCheck_4f warn;
   class START,END term;
-</pre></div></div>
+</pre></div>
+<div class="minimap"><div class="mmview"></div></div>
+<aside class="drawer"><header><span class="n"></span><span class="t"></span><button title="Close">&times;</button></header><div class="body"></div></aside>
+</div>
+<p class="hint-row">click any command for its full detail · drag to pan · scroll to zoom · <kbd>/</kbd> find · <kbd>f</kbd> fit · <kbd>0</kbd> 100% · <kbd>Esc</kbd> clear</p>
 </div></section>
 <section id="rollback_configuration"><h2>ROLLBACK_CONFIGURATION</h2>
 <div class="gate">
 <span><b>phase runs when</b> <code>${ROLLBACK_REQUIRED == &quot;true&quot;}</code></span>
 <span><b>commands</b> 42</span>
 </div>
-<div class="canvas">
+<div class="canvas" data-name="ROLLBACK_CONFIGURATION">
 <div class="toolbar">
-<button data-act="out" title="Zoom out">&minus;</button>
+<button data-act="out" title="Zoom out (-)">&minus;</button>
 <span class="zoom">100%</span>
-<button data-act="in" title="Zoom in">&plus;</button>
-<button data-act="fit" title="Fit to window">Fit</button>
-<button data-act="reset" title="Actual size">100%</button>
-<button data-act="full" title="Fullscreen">Fullscreen</button>
+<button data-act="in" title="Zoom in (+)">&plus;</button>
+<button data-act="fit" title="Fit to window (f)">Fit</button>
+<button data-act="reset" title="Actual size (0)">100%</button>
+<input class="find" type="search" placeholder="Find a command  /" aria-label="Find a command">
+<span class="found"></span>
 <span class="spacer"></span>
-<span class="hint">drag to pan · scroll to zoom · double-click to fit</span>
+<button data-act="map" class="on" title="Toggle minimap">Map</button>
+<button data-act="svg" title="Download this phase as SVG">SVG</button>
+<button data-act="png" title="Download this phase as PNG">PNG</button>
+<button data-act="full" title="Fullscreen">Fullscreen</button>
 </div>
 <div class="viewport"><div class="stage"><pre class="mermaid">
 %%{init:{"theme":"base","themeVariables":{"fontFamily":"Segoe UI, system-ui, sans-serif","fontSize":"13px","primaryColor":"#eaf0f7","primaryTextColor":"#10243a","primaryBorderColor":"#2a6099","lineColor":"#8095ab","textColor":"#10243a","nodeTextColor":"#10243a","edgeLabelBackground":"#ffffff","labelBackground":"#ffffff","tertiaryColor":"#ffffff","mainBkg":"#eaf0f7","clusterBkg":"#ffffff"}}}%%
@@ -740,10 +848,9 @@ flowchart TD
   rollback_configuration_6["<b>6. niam_sbc_server</b><br/>printf 'put<br/>/storage/Signaling_$(NODE_NAME)_$(DATE)_Rollback.xml<br/>$(BACK_UP_LOCATION_REPO)/Signaling_$(DATE)_Rollback.xml/nbye/n' …"]
   rollback_configuration_6v{"FILECOPY != ''"}
   rollback_configuration_6 --> rollback_configuration_6v
-  rollback_configuration_6f["recorded, run continues"]
+  rollback_configuration_6f["run stops here (inherited)"]
   rollback_configuration_6v -- "fail" --> rollback_configuration_6f
   rollback_configuration_6v -- "pass" --> rollback_configuration_7
-  rollback_configuration_6f --> rollback_configuration_7
   rollback_configuration_7["<b>7. repo</b><br/>sha256sum<br/>$(BACK_UP_LOCATION_REPO)/Signaling_$(DATE)_Rollback.xml<br/>| awk '(print $1)'"]
   rollback_configuration_7v{"ROLLBACKNODECHECKSUM ==<br/>REPOCHECKSUM"}
   rollback_configuration_7 --> rollback_configuration_7v
@@ -964,10 +1071,9 @@ flowchart TD
   rollback_configuration_35["<b>35. niam_sbc_server</b><br/>printf 'put<br/>/storage/Signaling_$(NODE_NAME)_$(DATE)_Rollback.xml<br/>$(BACK_UP_LOCATION_REPO)/Signaling_$(DATE)_Rollback.xml/nbye/n' …<br/><i>retry loop</i>"]
   rollback_configuration_35v{"FILECOPY != ''"}
   rollback_configuration_35 --> rollback_configuration_35v
-  rollback_configuration_35f["recorded, run continues"]
+  rollback_configuration_35f["run stops here (inherited)"]
   rollback_configuration_35v -- "fail" --> rollback_configuration_35f
   rollback_configuration_35v -- "pass" --> rollback_configuration_36
-  rollback_configuration_35f --> rollback_configuration_36
   rollback_configuration_36["<b>36. repo</b><br/>sha256sum<br/>$(BACK_UP_LOCATION_REPO)/Signaling_$(DATE)_Rollback.xml<br/>| awk '(print $1)'<br/><i>retry loop</i>"]
   rollback_configuration_36v{"ROLLBACKNODECHECKSUM ==<br/>REPOCHECKSUM"}
   rollback_configuration_36 --> rollback_configuration_36v
@@ -1033,11 +1139,15 @@ flowchart TD
   class rollback_configuration_1,rollback_configuration_2,rollback_configuration_3,rollback_configuration_4,rollback_configuration_5,rollback_configuration_6,rollback_configuration_7,rollback_configuration_8,rollback_configuration_9,rollback_configuration_10,rollback_configuration_11,rollback_configuration_12,rollback_configuration_13,rollback_configuration_14,rollback_configuration_15,rollback_configuration_16,rollback_configuration_17,rollback_configuration_18,rollback_configuration_19,rollback_configuration_20,rollback_configuration_21,rollback_configuration_22,rollback_configuration_23,rollback_configuration_24,rollback_configuration_25,rollback_configuration_26,rollback_configuration_27,rollback_configuration_28,rollback_configuration_29,rollback_configuration_30,rollback_configuration_31,rollback_configuration_32,rollback_configuration_33,rollback_configuration_34,rollback_configuration_35,rollback_configuration_36,rollback_configuration_37,rollback_configuration_38,rollback_configuration_39,rollback_configuration_40,rollback_configuration_41,rollback_configuration_42 cmd;
   class rollback_configuration_3v,rollback_configuration_4g,rollback_configuration_4v,rollback_configuration_6v,rollback_configuration_7v,rollback_configuration_8v,rollback_configuration_9v,rollback_configuration_10g,rollback_configuration_10v,rollback_configuration_11v,rollback_configuration_12v,rollback_configuration_13g,rollback_configuration_13v,rollback_configuration_15g,rollback_configuration_15v,rollback_configuration_17v,rollback_configuration_18v,rollback_configuration_19v,rollback_configuration_20v,rollback_configuration_21g,rollback_configuration_21v,rollback_configuration_22g,rollback_configuration_22v,rollback_configuration_23v,rollback_configuration_24g,rollback_configuration_24v,rollback_configuration_25g,rollback_configuration_25v,rollback_configuration_26g,rollback_configuration_26v,rollback_configuration_27g,rollback_configuration_27v,rollback_configuration_28g,rollback_configuration_28v,rollback_configuration_29g,rollback_configuration_29v,rollback_configuration_30g,rollback_configuration_30v,rollback_configuration_32v,rollback_configuration_33g,rollback_configuration_33v,rollback_configuration_35v,rollback_configuration_36v,rollback_configuration_37v,rollback_configuration_38v,rollback_configuration_39g,rollback_configuration_39v,rollback_configuration_40v,rollback_configuration_41v,rollback_configuration_42g,rollback_configuration_42v gate;
   class rollback_configuration_4skip,rollback_configuration_10skip,rollback_configuration_13skip,rollback_configuration_15skip,rollback_configuration_21skip,rollback_configuration_22skip,rollback_configuration_24skip,rollback_configuration_25skip,rollback_configuration_26skip,rollback_configuration_27skip,rollback_configuration_28skip,rollback_configuration_29skip,rollback_configuration_30skip,rollback_configuration_33skip,rollback_configuration_39skip,rollback_configuration_42skip warn;
-  class rollback_configuration_3f,rollback_configuration_6f,rollback_configuration_7f,rollback_configuration_8f,rollback_configuration_9f,rollback_configuration_11f,rollback_configuration_12f,rollback_configuration_15f,rollback_configuration_25f,rollback_configuration_26f,rollback_configuration_27f,rollback_configuration_28f,rollback_configuration_29f,rollback_configuration_30f,rollback_configuration_32f,rollback_configuration_35f,rollback_configuration_36f,rollback_configuration_37f,rollback_configuration_38f,rollback_configuration_40f,rollback_configuration_41f warn;
+  class rollback_configuration_3f,rollback_configuration_7f,rollback_configuration_8f,rollback_configuration_9f,rollback_configuration_11f,rollback_configuration_12f,rollback_configuration_15f,rollback_configuration_25f,rollback_configuration_26f,rollback_configuration_27f,rollback_configuration_28f,rollback_configuration_29f,rollback_configuration_30f,rollback_configuration_32f,rollback_configuration_36f,rollback_configuration_37f,rollback_configuration_38f,rollback_configuration_40f,rollback_configuration_41f warn;
   class rollback_configuration_17f,rollback_configuration_18f,rollback_configuration_19f rb;
-  class rollback_configuration_4f,rollback_configuration_10f,rollback_configuration_13f,rollback_configuration_20f,rollback_configuration_21f,rollback_configuration_22f,rollback_configuration_23f,rollback_configuration_24f,rollback_configuration_33f,rollback_configuration_39f,rollback_configuration_42f stopn;
+  class rollback_configuration_4f,rollback_configuration_6f,rollback_configuration_10f,rollback_configuration_13f,rollback_configuration_20f,rollback_configuration_21f,rollback_configuration_22f,rollback_configuration_23f,rollback_configuration_24f,rollback_configuration_33f,rollback_configuration_35f,rollback_configuration_39f,rollback_configuration_42f stopn;
   class START,END term;
-</pre></div></div>
+</pre></div>
+<div class="minimap"><div class="mmview"></div></div>
+<aside class="drawer"><header><span class="n"></span><span class="t"></span><button title="Close">&times;</button></header><div class="body"></div></aside>
+</div>
+<p class="hint-row">click any command for its full detail · drag to pan · scroll to zoom · <kbd>/</kbd> find · <kbd>f</kbd> fit · <kbd>0</kbd> 100% · <kbd>Esc</kbd> clear</p>
 </div></section>
 <footer>Generated from <code>C:/Users/parmahaj/Documents/Projects/Nokia/clicr-simulator/workflows/SBC_96_FIXED_LINE_CONFIGURATION_IN_SBC.yaml</code> · 105 commands · re-run gen_command_diagram.py after any YAML change.</footer>
 </div>
@@ -3073,25 +3183,49 @@ Expecting `+Qe.join(", ")+", got '"+(this.terminals_[Ne]||Ne)+"'":Dt="Parse erro
 `;function NWe(i,s,u=!1){var R,F,j;const d=i;let p="default";(((R=d==null?void 0:d.classes)==null?void 0:R.length)||0)>0&&(p=((d==null?void 0:d.classes)||[]).join(" ")),p=p+" flowchart-label";let v=0,b="",y;switch(d.type){case"round":v=5,b="rect";break;case"composite":v=0,b="composite",y=0;break;case"square":b="rect";break;case"diamond":b="question";break;case"hexagon":b="hexagon";break;case"block_arrow":b="block_arrow";break;case"odd":b="rect_left_inv_arrow";break;case"lean_right":b="lean_right";break;case"lean_left":b="lean_left";break;case"trapezoid":b="trapezoid";break;case"inv_trapezoid":b="inv_trapezoid";break;case"rect_left_inv_arrow":b="rect_left_inv_arrow";break;case"circle":b="circle";break;case"ellipse":b="ellipse";break;case"stadium":b="stadium";break;case"subroutine":b="subroutine";break;case"cylinder":b="cylinder";break;case"group":b="rect";break;case"doublecircle":b="doublecircle";break;default:b="rect"}const T=om((d==null?void 0:d.styles)||[]),_=d.label,A=d.size||{width:0,height:0,x:0,y:0};return{labelStyle:T.labelStyle,shape:b,labelText:_,rx:v,ry:v,class:p,style:T.style,id:d.id,directions:d.directions,width:A.width,height:A.height,x:A.x,y:A.y,positioned:u,intersect:void 0,type:d.type,padding:y??(((j=(F=Vh())==null?void 0:F.block)==null?void 0:j.padding)||0)}}async function kcn(i,s,u){const d=NWe(s,u,!1);if(d.type==="group")return;const p=await tJ(i,d),v=p.node().getBBox(),b=u.getBlock(d.id);b.size={width:v.width,height:v.height,x:0,y:0,node:p},u.setBlock(b),p.remove()}async function Ecn(i,s,u){const d=NWe(s,u,!0);u.getBlock(d.id).type!=="space"&&(await tJ(i,d),s.intersect=d==null?void 0:d.intersect,$me(d))}async function dwe(i,s,u,d){for(const p of s)await d(i,p,u),p.children&&await dwe(i,p.children,u,d)}async function Tcn(i,s,u){await dwe(i,s,u,kcn)}async function Ccn(i,s,u){await dwe(i,s,u,Ecn)}async function Scn(i,s,u,d,p){const v=new B0({multigraph:!0,compound:!0});v.setGraph({rankdir:"TB",nodesep:10,ranksep:10,marginx:8,marginy:8});for(const b of u)b.size&&v.setNode(b.id,{width:b.size.width,height:b.size.height,intersect:b.intersect});for(const b of s)if(b.start&&b.end){const y=d.getBlock(b.start),T=d.getBlock(b.end);if(y!=null&&y.size&&(T!=null&&T.size)){const _=y.size,A=T.size,P=[{x:_.x,y:_.y},{x:_.x+(A.x-_.x)/2,y:_.y+(A.y-_.y)/2},{x:A.x,y:A.y}];await IUe(i,{v:b.start,w:b.end,name:b.id},{...b,arrowTypeEnd:b.arrowTypeEnd,arrowTypeStart:b.arrowTypeStart,points:P,classes:"edge-thickness-normal edge-pattern-solid flowchart-link LS-a1 LE-b1"},void 0,"block",v,p),b.label&&(await zme(i,{...b,label:b.label,labelStyle:"stroke: #333; stroke-width: 1.5px;fill:none;",arrowTypeEnd:b.arrowTypeEnd,arrowTypeStart:b.arrowTypeStart,points:P,classes:"edge-thickness-normal edge-pattern-solid flowchart-link LS-a1 LE-b1"}),await MUe({...b,x:P[1].x,y:P[1].y},{originalPath:P}))}}}const e0=((RWe=(FWe=qt())==null?void 0:FWe.block)==null?void 0:RWe.padding)||8;function _cn(i,s){if(i===0||!Number.isInteger(i))throw new Error("Columns must be an integer !== 0.");if(s<0||!Number.isInteger(s))throw new Error("Position must be a non-negative integer."+s);if(i<0)return{px:s,py:0};if(i===1)return{px:0,py:s};const u=s%i,d=Math.floor(s/i);return{px:u,py:d}}const Acn=i=>{let s=0,u=0;for(const d of i.children){const{width:p,height:v,x:b,y}=d.size||{width:0,height:0,x:0,y:0};Xe.debug("getMaxChildSize abc95 child:",d.id,"width:",p,"height:",v,"x:",b,"y:",y,d.type),d.type!=="space"&&(p>s&&(s=p/(i.widthInColumns||1)),v>u&&(u=v))}return{width:s,height:u}};function gwe(i,s,u=0,d=0){var b,y,T,_,A,P,R,F,j,K,ee;Xe.debug("setBlockSizes abc95 (start)",i.id,(b=i==null?void 0:i.size)==null?void 0:b.x,"block width =",i==null?void 0:i.size,"sieblingWidth",u),(y=i==null?void 0:i.size)!=null&&y.width||(i.size={width:u,height:d,x:0,y:0});let p=0,v=0;if(((T=i.children)==null?void 0:T.length)>0){for(const de of i.children)gwe(de,s);const ie=Acn(i);p=ie.width,v=ie.height,Xe.debug("setBlockSizes abc95 maxWidth of",i.id,":s children is ",p,v);for(const de of i.children)de.size&&(Xe.debug(`abc95 Setting size of children of ${i.id} id=${de.id} ${p} ${v} ${de.size}`),de.size.width=p*(de.widthInColumns||1)+e0*((de.widthInColumns||1)-1),de.size.height=v,de.size.x=0,de.size.y=0,Xe.debug(`abc95 updating size of ${i.id} children child:${de.id} maxWidth:${p} maxHeight:${v}`));for(const de of i.children)gwe(de,s,p,v);const oe=i.columns||-1;let pe=0;for(const de of i.children)pe+=de.widthInColumns||1;let be=i.children.length;oe>0&&oe<pe&&(be=oe),i.widthInColumns;const ae=Math.ceil(pe/be);let ne=be*(p+e0)+e0,se=ae*(v+e0)+e0;if(ne<u){Xe.debug(`Detected to small siebling: abc95 ${i.id} sieblingWidth ${u} sieblingHeight ${d} width ${ne}`),ne=u,se=d;const de=(u-be*e0-e0)/be,X=(d-ae*e0-e0)/ae;Xe.debug("Size indata abc88",i.id,"childWidth",de,"maxWidth",p),Xe.debug("Size indata abc88",i.id,"childHeight",X,"maxHeight",v),Xe.debug("Size indata abc88 xSize",be,"padding",e0);for(const ge of i.children)ge.size&&(ge.size.width=de,ge.size.height=X,ge.size.x=0,ge.size.y=0)}if(Xe.debug(`abc95 (finale calc) ${i.id} xSize ${be} ySize ${ae} columns ${oe}${i.children.length} width=${Math.max(ne,((_=i.size)==null?void 0:_.width)||0)}`),ne<(((A=i==null?void 0:i.size)==null?void 0:A.width)||0)){ne=((P=i==null?void 0:i.size)==null?void 0:P.width)||0;const de=oe>0?Math.min(i.children.length,oe):i.children.length;if(de>0){const X=(ne-de*e0-e0)/de;Xe.debug("abc95 (growing to fit) width",i.id,ne,(R=i.size)==null?void 0:R.width,X);for(const ge of i.children)ge.size&&(ge.size.width=X)}}i.size={width:ne,height:se,x:0,y:0}}Xe.debug("setBlockSizes abc94 (done)",i.id,(F=i==null?void 0:i.size)==null?void 0:F.x,(j=i==null?void 0:i.size)==null?void 0:j.width,(K=i==null?void 0:i.size)==null?void 0:K.y,(ee=i==null?void 0:i.size)==null?void 0:ee.height)}function PWe(i,s){var d,p,v,b,y,T,_,A,P,R,F,j,K,ee,ie,oe,pe;Xe.debug(`abc85 layout blocks (=>layoutBlocks) ${i.id} x: ${(d=i==null?void 0:i.size)==null?void 0:d.x} y: ${(p=i==null?void 0:i.size)==null?void 0:p.y} width: ${(v=i==null?void 0:i.size)==null?void 0:v.width}`);const u=i.columns||-1;if(Xe.debug("layoutBlocks columns abc95",i.id,"=>",u,i),i.children&&i.children.length>0){const be=((y=(b=i==null?void 0:i.children[0])==null?void 0:b.size)==null?void 0:y.width)||0,ae=i.children.length*be+(i.children.length-1)*e0;Xe.debug("widthOfChildren 88",ae,"posX");let ne=0;Xe.debug("abc91 block?.size?.x",i.id,(T=i==null?void 0:i.size)==null?void 0:T.x);let se=(_=i==null?void 0:i.size)!=null&&_.x?((A=i==null?void 0:i.size)==null?void 0:A.x)+(-((P=i==null?void 0:i.size)==null?void 0:P.width)/2||0):-e0,de=0;for(const X of i.children){const ge=i;if(!X.size)continue;const{width:W,height:xe}=X.size,{px:U,py:Fe}=_cn(u,ne);if(Fe!=de&&(de=Fe,se=(R=i==null?void 0:i.size)!=null&&R.x?((F=i==null?void 0:i.size)==null?void 0:F.x)+(-((j=i==null?void 0:i.size)==null?void 0:j.width)/2||0):-e0,Xe.debug("New row in layout for block",i.id," and child ",X.id,de)),Xe.debug(`abc89 layout blocks (child) id: ${X.id} Pos: ${ne} (px, py) ${U},${Fe} (${(K=ge==null?void 0:ge.size)==null?void 0:K.x},${(ee=ge==null?void 0:ge.size)==null?void 0:ee.y}) parent: ${ge.id} width: ${W}${e0}`),ge.size){const Pe=W/2;X.size.x=se+e0+Pe,Xe.debug(`abc91 layout blocks (calc) px, pyid:${X.id} startingPos=X${se} new startingPosX${X.size.x} ${Pe} padding=${e0} width=${W} halfWidth=${Pe} => x:${X.size.x} y:${X.size.y} ${X.widthInColumns} (width * (child?.w || 1)) / 2 ${W*((X==null?void 0:X.widthInColumns)||1)/2}`),se=X.size.x+Pe,X.size.y=ge.size.y-ge.size.height/2+Fe*(xe+e0)+xe/2+e0,Xe.debug(`abc88 layout blocks (calc) px, pyid:${X.id}startingPosX${se}${e0}${Pe}=>x:${X.size.x}y:${X.size.y}${X.widthInColumns}(width * (child?.w || 1)) / 2${W*((X==null?void 0:X.widthInColumns)||1)/2}`)}X.children&&PWe(X),ne+=(X==null?void 0:X.widthInColumns)||1,Xe.debug("abc88 columnsPos",X,ne)}}Xe.debug(`layout blocks (<==layoutBlocks) ${i.id} x: ${(ie=i==null?void 0:i.size)==null?void 0:ie.x} y: ${(oe=i==null?void 0:i.size)==null?void 0:oe.y} width: ${(pe=i==null?void 0:i.size)==null?void 0:pe.width}`)}function BWe(i,{minX:s,minY:u,maxX:d,maxY:p}={minX:0,minY:0,maxX:0,maxY:0}){if(i.size&&i.id!=="root"){const{x:v,y:b,width:y,height:T}=i.size;v-y/2<s&&(s=v-y/2),b-T/2<u&&(u=b-T/2),v+y/2>d&&(d=v+y/2),b+T/2>p&&(p=b+T/2)}if(i.children)for(const v of i.children)({minX:s,minY:u,maxX:d,maxY:p}=BWe(v,{minX:s,minY:u,maxX:d,maxY:p}));return{minX:s,minY:u,maxX:d,maxY:p}}function Lcn(i){const s=i.getBlock("root");if(!s)return;gwe(s,i,0,0),PWe(s),Xe.debug("getBlocks",JSON.stringify(s,null,2));const{minX:u,minY:d,maxX:p,maxY:v}=BWe(s),b=v-d,y=p-u;return{x:u,y:d,width:y,height:b}}const Mcn=Object.freeze(Object.defineProperty({__proto__:null,diagram:{parser:ucn,db:ycn,renderer:{draw:async function(i,s,u,d){const{securityLevel:p,block:v}=Vh(),b=d.db;let y;p==="sandbox"&&(y=Ir("#i"+s));const T=Ir(p==="sandbox"?y.nodes()[0].contentDocument.body:"body"),_=p==="sandbox"?T.select(`[id="${s}"]`):Ir(`[id="${s}"]`);Sme(_,["point","circle","cross"],d.type,s);const P=b.getBlocks(),R=b.getBlocksFlat(),F=b.getEdges(),j=_.insert("g").attr("class","block");await Tcn(j,P,b);const K=Lcn(b);if(await Ccn(j,P,b),await Scn(j,F,R,b,s),K){const ee=K,ie=Math.max(1,Math.round(.125*(ee.width/ee.height))),oe=ee.height+ie+10,pe=ee.width+10,{useMaxWidth:be}=v;Ng(_,oe,pe,!!be),Xe.debug("Here Bounds",K,ee),_.attr("viewBox",`${ee.x-5} ${ee.y-5} ${ee.width+10} ${ee.height+10}`)}_F(zFe)},getClasses:function(i,s){return s.db.getClasses()}},styles:xcn}},Symbol.toStringTag,{value:"Module"}));return um});
 
 </script>
+<script>window.STEP_INFO = {"preNodeHealthCheck_1": {"n": 1, "node": "niam_sbc_server", "desc": "Verifies the health of the alarm subsystem.", "cmd": "alarm_check --action health", "when": "", "skip": "", "crit": "${ALARMHEALTHSTATUS != \"\"}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": false}, "preNodeHealthCheck_2": {"n": 2, "node": "niam_sbc_server", "desc": "Displays current alarms on the SBC node.", "cmd": "alarm_cli --list all", "when": "", "skip": "", "crit": "", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": false}, "preNodeHealthCheck_3": {"n": 3, "node": "niam_sbc_server", "desc": "Displays LCP host and service member status.", "cmd": "lcp_status", "when": "", "skip": "", "crit": "${INVALIDHOST == \"\" && INVALIDSERVICE == \"\"}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": false}, "preNodeHealthCheck_4": {"n": 4, "node": "niam_sbc_server", "desc": "Displays REM service and redundancy status.", "cmd": "rem_srv_state --action display --set all", "when": "", "skip": "", "crit": "${INVALIDCARDSTATE == \"\" && INVALIDREMCSTATE == \"\"}", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": false}, "backup_1": {"n": 1, "node": "niam_sbc_server", "desc": "Get LCP management IP address and type", "cmd": "lcp_status | awk '$1==\"MI\" && $4==\"ENABLED\"{n=split($6,a,\",\"); for(i=1;i<=n;i++) if(a[i]~/^[0-9]+\\./ && a[i]!~/^169\\.254\\./){print a[i]\" (IPv4)\"; found=1; exit} for(i=1;i<=n;i++) if(a[i]~/:/){print a[i]\" (IPv6)\"; found=1; exit}} END{exit !found}'", "when": "", "skip": "", "crit": "", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": false}, "backup_2": {"n": 2, "node": "niam_sbc_server", "desc": "date", "cmd": "date +%Y-%m-%d_%H-%M-%S", "when": "", "skip": "", "crit": "", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": false}, "backup_3": {"n": 3, "node": "niam_sbc_server", "desc": "Take full signaling-plane Configuration backup (root)", "cmd": "/opt/sbc/CurrRel/scripts/netconfprov/netconfprov --plane signaling --user ${USER} --pemfile /root/.ssh/id_rsa --readall > /storage/Signaling_${NODE_NAME}_${DATE}.xml", "when": "", "skip": "", "crit": "${ERRORMSG == \"\" && ROOTNOTALLOWED == \"\"}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": false}, "backup_4": {"n": 4, "node": "niam_sbc_server", "desc": "Take full signaling-plane Configuration backup (netconfcli fallback)", "cmd": "/opt/sbc/CurrRel/scripts/netconfprov/netconfprov --plane signaling --user netconfcli --pemfile /var/webui/.ssh/id_rsa --readall > /storage/Signaling_${NODE_NAME}_${DATE}.xml", "when": "${NETCONF_ROOT_OK == \"false\"}", "skip": "", "crit": "${ERRORMSG == \"\"}", "sets": ["XML_BACKUP = false"], "fail": "stop", "failtext": "run stops here", "loop": false}, "backup_5": {"n": 5, "node": "niam_sbc_server", "desc": "Finding Checksum for the backup file", "cmd": "sha256sum /storage/Signaling_${NODE_NAME}_${DATE}.xml | awk '{print $1}'", "when": "${XML_BACKUP == \"true\"}", "skip": "", "crit": "", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": false}, "backup_6": {"n": 6, "node": "repo_server", "desc": "Creating a Directory for Backup Files", "cmd": "mkdir -p ${BACK_UP_LOCATION_REPO}", "when": "", "skip": "", "crit": "", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": false}, "backup_7": {"n": 7, "node": "niam_sbc_server", "desc": "SFTP upload backup from SBC Node to Repository Server", "cmd": "printf \"put /storage/Signaling_${NODE_NAME}_${DATE}.xml ${BACK_UP_LOCATION_REPO}/Signaling_${NODE_NAME}_${DATE}.xml\\nbye\\n\" | sftp -o StrictHostKeyChecking=no admin@${repo_server_ip}", "when": "", "skip": "", "crit": "${FILECOPY != \"\"}", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": false}, "backup_8": {"n": 8, "node": "repo_server", "desc": "Finding and Comparing Checksum for Uploaded File", "cmd": "sha256sum ${BACK_UP_LOCATION_REPO}/Signaling_${NODE_NAME}_${DATE}.xml | awk '{print $1}'", "when": "", "skip": "", "crit": "${BACKUPNODECHECKSUM == BACKUPREPOCHECKSUM}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": false}, "backup_9": {"n": 9, "node": "niam_sbc_server", "desc": "Attempt ${ATTEMPT} - re-upload signaling backup to repo", "cmd": "printf \"put /storage/Signaling_${NODE_NAME}_${DATE}.xml ${BACK_UP_LOCATION_REPO}/Signaling_${NODE_NAME}_${DATE}.xml\\nbye\\n\" | sftp -o StrictHostKeyChecking=no admin@${repo_server_ip}", "when": "", "skip": "", "crit": "${FILECOPY != \"\"}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": true}, "backup_10": {"n": 10, "node": "repo_server", "desc": "Attempt ${ATTEMPT} - re-verify checksum", "cmd": "sha256sum ${BACK_UP_LOCATION_REPO}/Signaling_${NODE_NAME}_${DATE}.xml | awk '{print $1}'", "when": "", "skip": "", "crit": "${BACKUPNODECHECKSUM == BACKUPREPOCHECKSUM}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": true}, "backup_11": {"n": 11, "node": "locals", "desc": "Abort if checksum still mismatched after ${RETRY_COUNT} retries", "cmd": "echo checksum-guard", "when": "${CHECKSUM_STATUS != \"SUCCESS\"}", "skip": "", "crit": "${CHECKSUM_STATUS == \"SUCCESS\"}", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": false}, "backup_12": {"n": 12, "node": "locals", "desc": "Finding and Comparing Checksum for Uploaded File.", "cmd": "sha256sum ${LOCAL_PATH}/Signaling_${NODE_NAME}_${DATE}.xml | awk '{print $1}'", "when": "", "skip": "", "crit": "${BACKUPREPOCHECKSUM == LOCALCHECKSUM}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": false}, "backup_13": {"n": 13, "node": "locals", "desc": "Attempt ${ATTEMPT} - re-verify checksum", "cmd": "sha256sum ${LOCAL_PATH}/Signaling_${NODE_NAME}_${DATE}.xml | awk '{print $1}'", "when": "", "skip": "", "crit": "${BACKUPREPOCHECKSUM == LOCALCHECKSUM}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": true}, "backup_14": {"n": 14, "node": "locals", "desc": "Abort if checksum still mismatched after ${RETRY_COUNT} retries", "cmd": "echo checksum-guard", "when": "${CHECKSUM_STATUS != \"SUCCESS\"}", "skip": "", "crit": "${CHECKSUM_STATUS == \"SUCCESS\"}", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": false}, "backup_15": {"n": 15, "node": "niam_sbc_server", "desc": "Take media-plane 1 Configuration backup (root)", "cmd": "/opt/sbc/CurrRel/scripts/netconfprov/netconfprov --plane media --user ${USER} --pemfile /root/.ssh/id_rsa --readall --mediaid 1 > /storage/MGW01_${NODE_NAME}_${DATE}.xml", "when": "", "skip": "", "crit": "${ERRORMSG == \"\" && ROOTNOTALLOWED == \"\"}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": false}, "backup_16": {"n": 16, "node": "niam_sbc_server", "desc": "Finding Checksum for the media-plane 1 backup file", "cmd": "sha256sum /storage/MGW01_${NODE_NAME}_${DATE}.xml | awk '{print $1}'", "when": "", "skip": "", "crit": "", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": false}, "backup_17": {"n": 17, "node": "niam_sbc_server", "desc": "SFTP upload media-plane 1 backup from SBC Node to Repository Server", "cmd": "printf \"put /storage/MGW01_${NODE_NAME}_${DATE}.xml ${BACK_UP_LOCATION_REPO}/MGW01_Activity.xml\\nbye\\n\" | sftp -o StrictHostKeyChecking=no admin@${repo_server_ip}", "when": "", "skip": "", "crit": "${MGW01FILECOPY != \"\"}", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": false}, "backup_18": {"n": 18, "node": "repo_server", "desc": "Finding and Comparing Checksum for Uploaded media-plane 1 File", "cmd": "sha256sum ${BACK_UP_LOCATION_REPO}/MGW01_Activity.xml | awk '{print $1}'", "when": "", "skip": "", "crit": "${MGW01NODECHECKSUM == MGW01REPOCHECKSUM}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": false}, "backup_19": {"n": 19, "node": "niam_sbc_server", "desc": "Attempt ${ATTEMPT} - re-upload media-plane 1 backup to repo", "cmd": "printf \"put /storage/MGW01_${NODE_NAME}_${DATE}.xml ${BACK_UP_LOCATION_REPO}/MGW01_Activity.xml\\nbye\\n\" | sftp -o StrictHostKeyChecking=no admin@${repo_server_ip}", "when": "", "skip": "", "crit": "${MGW01FILECOPY != \"\"}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": true}, "backup_20": {"n": 20, "node": "repo_server", "desc": "Attempt ${ATTEMPT} - re-verify media-plane 1 checksum", "cmd": "sha256sum ${BACK_UP_LOCATION_REPO}/MGW01_Activity.xml | awk '{print $1}'", "when": "", "skip": "", "crit": "${MGW01NODECHECKSUM == MGW01REPOCHECKSUM}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": true}, "backup_21": {"n": 21, "node": "locals", "desc": "Abort if media-plane 1 checksum still mismatched after ${RETRY_COUNT} retries", "cmd": "echo checksum-guard", "when": "${MGW01CHECKSUMSTATUS != \"SUCCESS\"}", "skip": "", "crit": "${MGW01CHECKSUMSTATUS == \"SUCCESS\"}", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": false}, "backup_22": {"n": 22, "node": "niam_sbc_server", "desc": "Take media-plane 2 Configuration  backup (root)", "cmd": "/opt/sbc/CurrRel/scripts/netconfprov/netconfprov --plane media --user ${USER} --pemfile /root/.ssh/id_rsa --readall --mediaid 2 > /storage/MGW02_${NODE_NAME}_${DATE}.xml", "when": "", "skip": "", "crit": "${ERRORMSG == \"\" && ROOTNOTALLOWED == \"\"}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": false}, "backup_23": {"n": 23, "node": "niam_sbc_server", "desc": "Finding Checksum for the media-plane 2 backup file", "cmd": "sha256sum /storage/MGW02_${NODE_NAME}_${DATE}.xml | awk '{print $1}'", "when": "", "skip": "", "crit": "", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": false}, "backup_24": {"n": 24, "node": "niam_sbc_server", "desc": "SFTP upload media-plane 2 backup from SBC Node to Repository Server", "cmd": "printf \"put /storage/MGW02_${NODE_NAME}_${DATE}.xml ${BACK_UP_LOCATION_REPO}/MGW02_Activity.xml\\nbye\\n\" | sftp -o StrictHostKeyChecking=no admin@${repo_server_ip}", "when": "", "skip": "", "crit": "${MGW02FILECOPY != \"\"}", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": false}, "backup_25": {"n": 25, "node": "repo_server", "desc": "Finding and Comparing Checksum for Uploaded media-plane 2 File", "cmd": "sha256sum ${BACK_UP_LOCATION_REPO}/MGW02_Activity.xml | awk '{print $1}'", "when": "", "skip": "", "crit": "${MGW02NODECHECKSUM == MGW02REPOCHECKSUM}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": false}, "backup_26": {"n": 26, "node": "niam_sbc_server", "desc": "Attempt ${ATTEMPT} - re-upload media-plane 2 backup to repo", "cmd": "printf \"put /storage/MGW02_${NODE_NAME}_${DATE}.xml ${BACK_UP_LOCATION_REPO}/MGW02_Activity.xml\\nbye\\n\" | sftp -o StrictHostKeyChecking=no admin@${repo_server_ip}", "when": "", "skip": "", "crit": "${MGW02FILECOPY != \"\"}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": true}, "backup_27": {"n": 27, "node": "repo_server", "desc": "Attempt ${ATTEMPT} - re-verify media-plane 2 checksum", "cmd": "sha256sum ${BACK_UP_LOCATION_REPO}/MGW02_Activity.xml | awk '{print $1}'", "when": "", "skip": "", "crit": "${MGW02NODECHECKSUM == MGW02REPOCHECKSUM}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": true}, "backup_28": {"n": 28, "node": "locals", "desc": "Abort if media-plane 2 checksum still mismatched after ${RETRY_COUNT} retries", "cmd": "echo checksum-guard", "when": "${MGW02CHECKSUMSTATUS != \"SUCCESS\"}", "skip": "", "crit": "${MGW02CHECKSUMSTATUS == \"SUCCESS\"}", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": false}, "activity_configuration_1": {"n": 1, "node": "locals", "desc": "validate and generate network configuration xml from CIQ data according to table", "cmd": "python ${ACTIVITY_PYTHON_SCRIPT_PATH}/netconf_generate_xml.py --json \"${INPUT_JSON_FILE_NAME}\" --node ${NODE_NAME} --xmlns \"${xmlns}\" --primary-keys \"${primary_keys}\" --base \"${LOCAL_PATH}/Signaling_${NODE_NAME}_${DATE}.xml\" --output ${LOCAL_PATH}/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Activity.xml --table ${table_row.table} --group ${config_seq_row.configSeq}", "when": "", "skip": "", "crit": "${XMLGENSTATUS == \"SUCCESS\"}", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": true}, "activity_configuration_2": {"n": 2, "node": "niam_sbc_server", "desc": "Take full table configuration xml for ${table_row.table} before execution", "cmd": "/opt/sbc/CurrRel/scripts/netconfprov/netconfprov --plane signaling --user ${USER} --pemfile /root/.ssh/id_rsa --table ${table_row.table} --read > /storage/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Precheck.xml", "when": "", "skip": "", "crit": "${ERRORMSG == \"\" && ROOTNOTALLOWED == \"\"}", "sets": ["ROLLBACK_REQUIRED = true"], "fail": "rb", "failtext": "ROLLBACK_REQUIRED = true", "loop": true}, "activity_configuration_3": {"n": 3, "node": "niam_sbc_server", "desc": "Read configuration xml content for ${table_row.table} for prevalidation", "cmd": "cat /storage/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Precheck.xml; echo", "when": "", "skip": "", "crit": "${SIGNALINGXML != \"\"}", "sets": ["ROLLBACK_REQUIRED = true"], "fail": "rb", "failtext": "ROLLBACK_REQUIRED = true", "loop": true}, "activity_configuration_4": {"n": 4, "node": "locals", "desc": "creating network configuration xml for ${table_row.table} on locals", "cmd": "echo '${base64:SIGNALINGXML}' | base64 -d > ${LOCAL_PATH}/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Precheck.xml && echo WRITE_OK", "when": "", "skip": "", "crit": "", "sets": ["ROLLBACK_REQUIRED = true"], "fail": "rb", "failtext": "ROLLBACK_REQUIRED = true", "loop": true}, "activity_configuration_5": {"n": 5, "node": "locals", "desc": "validate network configuration XML generation to ensure data integrity and prevent the creation of invalid or inconsistent XML.", "cmd": "xmllint --noout ${LOCAL_PATH}/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Activity.xml && echo xml_valid", "when": "", "skip": "", "crit": "", "sets": ["ROLLBACK_REQUIRED = true"], "fail": "rb", "failtext": "ROLLBACK_REQUIRED = true", "loop": true}, "activity_configuration_6": {"n": 6, "node": "locals", "desc": "Read generate network configuration xml from CIQ data for ${table_row.table} ", "cmd": "cat ${LOCAL_PATH}/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Activity.xml; echo", "when": "", "skip": "", "crit": "${SIGNALINGXML != \"\"}", "sets": ["ROLLBACK_REQUIRED = true"], "fail": "rb", "failtext": "ROLLBACK_REQUIRED = true", "loop": true}, "activity_configuration_7": {"n": 7, "node": "niam_sbc_server", "desc": "creating network configuration xml for ${table_row.table} on node", "cmd": "echo '${base64:SIGNALINGXML}' | base64 -d > /storage/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Activity.xml && echo WRITE_OK", "when": "", "skip": "", "crit": "", "sets": ["ROLLBACK_REQUIRED = true"], "fail": "rb", "failtext": "ROLLBACK_REQUIRED = true", "loop": true}, "activity_configuration_8": {"n": 8, "node": "niam_sbc_server", "desc": "validate network configuration XML generation to ensure data integrity and prevent the creation of invalid or inconsistent XML.", "cmd": "xmllint --noout /storage/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Activity.xml && echo xml_valid", "when": "", "skip": "", "crit": "", "sets": ["ROLLBACK_REQUIRED = true"], "fail": "rb", "failtext": "ROLLBACK_REQUIRED = true", "loop": true}, "activity_configuration_9": {"n": 9, "node": "niam_sbc_server", "desc": "Apply New NETCONF XML Changes on SBC Node of ${table_row.table} (root)", "cmd": "/opt/sbc/CurrRel/scripts/netconfprov/netconfprov --plane signaling --user ${USER} --pemfile /root/.ssh/id_rsa --onerror abort /storage/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Activity.xml", "when": "", "skip": "", "crit": "${NETCONFABORTED == \"\" && ROOTNOTALLOWED == \"\"}", "sets": ["NETCONF_ROOT_OK = false", "EXECUTED_TABLES = ${EXECUTED_TABLES}${table_row.table}, ", "ROLLBACK_REQUIRED = true"], "fail": "rb", "failtext": "ROLLBACK_REQUIRED = true", "loop": true}, "activity_configuration_10": {"n": 10, "node": "niam_sbc_server", "desc": "Take full table configuration xml for ${table_row.table} (root)", "cmd": "/opt/sbc/CurrRel/scripts/netconfprov/netconfprov --plane signaling --user ${USER} --pemfile /root/.ssh/id_rsa --table ${table_row.table} --read > /storage/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Postcheck.xml", "when": "", "skip": "", "crit": "${ERRORMSG == \"\" && ROOTNOTALLOWED == \"\"}", "sets": ["ROLLBACK_REQUIRED = true", "NETCONF_ROOT_OK = false"], "fail": "rb", "failtext": "ROLLBACK_REQUIRED = true", "loop": true}, "activity_configuration_11": {"n": 11, "node": "niam_sbc_server", "desc": "validate network configuration XML generation to ensure data integrity and prevent the creation of invalid or inconsistent XML.", "cmd": "xmllint --noout /storage/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Activity.xml && echo xml_valid", "when": "", "skip": "", "crit": "", "sets": ["ROLLBACK_REQUIRED = true"], "fail": "rb", "failtext": "ROLLBACK_REQUIRED = true", "loop": true}, "activity_configuration_12": {"n": 12, "node": "niam_sbc_server", "desc": "Read configuration xml content for ${table_row.table} for postcheck", "cmd": "cat /storage/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Postcheck.xml; echo", "when": "", "skip": "", "crit": "${SIGNALINGXML != \"\"}", "sets": ["ROLLBACK_REQUIRED = true"], "fail": "rb", "failtext": "ROLLBACK_REQUIRED = true", "loop": true}, "activity_configuration_13": {"n": 13, "node": "locals", "desc": "creating network configuration xml for ${table_row.table} on locals", "cmd": "echo '${base64:SIGNALINGXML}' | base64 -d > ${LOCAL_PATH}/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Postcheck.xml && echo WRITE_OK", "when": "", "skip": "", "crit": "", "sets": ["ROLLBACK_REQUIRED = true"], "fail": "rb", "failtext": "ROLLBACK_REQUIRED = true", "loop": true}, "activity_configuration_14": {"n": 14, "node": "locals", "desc": "validate network configuration XML generation to ensure data integrity and prevent the creation of invalid or inconsistent XML.", "cmd": "xmllint --noout /storage/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Activity.xml && echo xml_valid", "when": "", "skip": "", "crit": "", "sets": ["ROLLBACK_REQUIRED = true"], "fail": "rb", "failtext": "ROLLBACK_REQUIRED = true", "loop": true}, "activity_configuration_15": {"n": 15, "node": "locals", "desc": "verify all the changes", "cmd": "python ${ACTIVITY_PYTHON_SCRIPT_PATH}/netconf_generate_xml.py --json \"${INPUT_JSON_FILE_NAME}\" --node ${NODE_NAME} --xmlns \"${xmlns}\" --primary-keys \"${primary_keys}\" --current \"${LOCAL_PATH}/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Postcheck.xml\" --table ${table_row.table} --postcheck --group ${config_seq_row.configSeq}", "when": "", "skip": "", "crit": "${POSTCHECKSTATUS == \"POSTCHECK PASSED\"}", "sets": ["ROLLBACK_REQUIRED = true"], "fail": "rb", "failtext": "ROLLBACK_REQUIRED = true", "loop": true}, "activity_configuration_16": {"n": 16, "node": "niam_sbc_server", "desc": "date", "cmd": "date +%Y-%m-%d_%H-%M-%S", "when": "", "skip": "", "crit": "${DATE != \"\"}", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": true}, "activity_configuration_17": {"n": 17, "node": "niam_sbc_server", "desc": "Take full signaling-plane Configuration backup for validating the diff group changes", "cmd": "/opt/sbc/CurrRel/scripts/netconfprov/netconfprov --plane signaling --user ${USER} --pemfile /root/.ssh/id_rsa --readall > /storage/Signaling_${NODE_NAME}_${DATE}.xml", "when": "", "skip": "", "crit": "${ERRORMSG == \"\" && ROOTNOTALLOWED == \"\"}", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": true}, "activity_configuration_18": {"n": 18, "node": "niam_sbc_server", "desc": "Finding Checksum for the backup file", "cmd": "sha256sum /storage/Signaling_${NODE_NAME}_${DATE}.xml | awk '{print $1}'", "when": "${XML_BACKUP == \"true\"}", "skip": "", "crit": "", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": true}, "activity_configuration_19": {"n": 19, "node": "repo_server", "desc": "Creating a Directory for Backup Files", "cmd": "mkdir -p ${BACK_UP_LOCATION_REPO}", "when": "", "skip": "", "crit": "", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": true}, "activity_configuration_20": {"n": 20, "node": "niam_sbc_server", "desc": "SFTP upload backup from SBC Node to Repository Server", "cmd": "printf \"put /storage/Signaling_${NODE_NAME}_${DATE}.xml ${BACK_UP_LOCATION_REPO}/Signaling_${NODE_NAME}_${DATE}.xml\\nbye\\n\" | sftp -o StrictHostKeyChecking=no admin@${repo_server_ip}", "when": "", "skip": "", "crit": "${FILECOPY != \"\"}", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": true}, "activity_configuration_21": {"n": 21, "node": "repo_server", "desc": "Finding and Comparing Checksum for Uploaded File", "cmd": "sha256sum ${BACK_UP_LOCATION_REPO}/Signaling_${NODE_NAME}_${DATE}.xml | awk '{print $1}'", "when": "", "skip": "", "crit": "${BACKUPNODECHECKSUM == BACKUPREPOCHECKSUM}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": true}, "activity_configuration_22": {"n": 22, "node": "niam_sbc_server", "desc": "Attempt ${ATTEMPT} - re-upload signaling backup to repo", "cmd": "printf \"put /storage/Signaling_${NODE_NAME}_${DATE}.xml ${BACK_UP_LOCATION_REPO}/Signaling_${NODE_NAME}_${DATE}.xml\\nbye\\n\" | sftp -o StrictHostKeyChecking=no admin@${repo_server_ip}", "when": "", "skip": "", "crit": "${FILECOPY != \"\"}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": true}, "activity_configuration_23": {"n": 23, "node": "repo_server", "desc": "Attempt ${ATTEMPT} - re-verify checksum", "cmd": "sha256sum ${BACK_UP_LOCATION_REPO}/Signaling_${NODE_NAME}_${DATE}.xml | awk '{print $1}'", "when": "", "skip": "", "crit": "${BACKUPNODECHECKSUM == BACKUPREPOCHECKSUM}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": true}, "activity_configuration_24": {"n": 24, "node": "locals", "desc": "Abort if checksum still mismatched after ${RETRY_COUNT} retries", "cmd": "echo checksum-guard", "when": "${CHECKSUM_STATUS != \"SUCCESS\"}", "skip": "", "crit": "${CHECKSUM_STATUS == \"SUCCESS\"}", "sets": ["ROLLBACK_REQUIRED = true"], "fail": "rb", "failtext": "ROLLBACK_REQUIRED = true", "loop": true}, "activity_configuration_25": {"n": 25, "node": "locals", "desc": "Finding and Comparing Checksum for Uploaded File.", "cmd": "sha256sum ${LOCAL_PATH}/Signaling_${NODE_NAME}_${DATE}.xml | awk '{print $1}'", "when": "", "skip": "", "crit": "${BACKUPREPOCHECKSUM == LOCALCHECKSUM}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": true}, "activity_configuration_26": {"n": 26, "node": "locals", "desc": "Attempt ${ATTEMPT} - re-verify checksum", "cmd": "sha256sum ${LOCAL_PATH}/Signaling_${NODE_NAME}_${DATE}.xml | awk '{print $1}'", "when": "", "skip": "", "crit": "${BACKUPREPOCHECKSUM == LOCALCHECKSUM}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": true}, "activity_configuration_27": {"n": 27, "node": "locals", "desc": "Abort if checksum still mismatched after ${RETRY_COUNT} retries", "cmd": "echo checksum-guard", "when": "${CHECKSUM_STATUS != \"SUCCESS\"}", "skip": "", "crit": "${CHECKSUM_STATUS == \"SUCCESS\"}", "sets": ["ROLLBACK_REQUIRED = true"], "fail": "rb", "failtext": "ROLLBACK_REQUIRED = true", "loop": true}, "postNodeHealthCheck_1": {"n": 1, "node": "niam_sbc_server", "desc": "Verifies the health of the alarm subsystem.", "cmd": "alarm_check --action health", "when": "", "skip": "", "crit": "${ALARMHEALTHSTATUS != \"\"}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": false}, "postNodeHealthCheck_2": {"n": 2, "node": "niam_sbc_server", "desc": "Displays current alarms on the SBC node.", "cmd": "alarm_cli --list all", "when": "", "skip": "", "crit": "", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": false}, "postNodeHealthCheck_3": {"n": 3, "node": "niam_sbc_server", "desc": "Displays LCP host and service member status.", "cmd": "lcp_status", "when": "", "skip": "", "crit": "${INVALIDHOST == \"\" && INVALIDSERVICE == \"\"}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": false}, "postNodeHealthCheck_4": {"n": 4, "node": "niam_sbc_server", "desc": "Displays REM service and redundancy status.", "cmd": "rem_srv_state --action display --set all", "when": "", "skip": "", "crit": "${INVALIDCARDSTATE == \"\" && INVALIDREMCSTATE == \"\"}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": false}, "rollback_configuration_1": {"n": 1, "node": "niam_sbc_server", "desc": "Get LCP management IP address and type", "cmd": "lcp_status | awk '$1==\"MI\" && $4==\"ENABLED\"{n=split($6,a,\",\"); for(i=1;i<=n;i++) if(a[i]~/^[0-9]+\\./ && a[i]!~/^169\\.254\\./){print a[i]\" (IPv4)\"; found=1; exit} for(i=1;i<=n;i++) if(a[i]~/:/){print a[i]\" (IPv6)\"; found=1; exit}} END{exit !found}'", "when": "", "skip": "", "crit": "", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": false}, "rollback_configuration_2": {"n": 2, "node": "niam_sbc_server", "desc": "date", "cmd": "date +%Y-%m-%d_%H-%M-%S", "when": "", "skip": "", "crit": "", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": false}, "rollback_configuration_3": {"n": 3, "node": "niam_sbc_server", "desc": "Take full signaling-plane network configuration xml (root)", "cmd": "/opt/sbc/CurrRel/scripts/netconfprov/netconfprov --plane signaling --user ${USER} --pemfile /root/.ssh/id_rsa --readall > /storage/Signaling_${NODE_NAME}_${DATE}_Rollback.xml", "when": "", "skip": "", "crit": "${ERRORMSG == \"\" && ROOTNOTALLOWED == \"\"}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": false}, "rollback_configuration_4": {"n": 4, "node": "niam_sbc_server", "desc": "Take full signaling-plane network configuration xml (netconfcli fallback)", "cmd": "/opt/sbc/CurrRel/scripts/netconfprov/netconfprov --plane signaling --user netconfcli --pemfile /var/webui/.ssh/id_rsa --readall > /storage/Signaling_${NODE_NAME}_${DATE}_Rollback.xml", "when": "${NETCONF_ROOT_OK == \"false\"}", "skip": "", "crit": "${ERRORMSG == \"\"}", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": false}, "rollback_configuration_5": {"n": 5, "node": "niam_sbc_server", "desc": "Finding Checksum for the backup file ", "cmd": "sha256sum /storage/Signaling_${NODE_NAME}_${DATE}_Rollback.xml | awk '{print $1}'", "when": "", "skip": "", "crit": "", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": false}, "rollback_configuration_6": {"n": 6, "node": "niam_sbc_server", "desc": "SFTP upload from ${NODE_NAME} to repository server.", "cmd": "printf \"put /storage/Signaling_${NODE_NAME}_${DATE}_Rollback.xml ${BACK_UP_LOCATION_REPO}/Signaling_${DATE}_Rollback.xml\\nbye\\n\" | sftp -o StrictHostKeyChecking=no admin@${repo_server_ip}", "when": "", "skip": "", "crit": "${FILECOPY != \"\"}", "sets": [], "fail": "stop", "failtext": "run stops here (inherited)", "loop": false}, "rollback_configuration_7": {"n": 7, "node": "repo_server", "desc": "Finding and Comparing Checksum for Uploaded File", "cmd": "sha256sum ${BACK_UP_LOCATION_REPO}/Signaling_${DATE}_Rollback.xml | awk '{print $1}'", "when": "", "skip": "", "crit": "${ROLLBACKNODECHECKSUM == REPOCHECKSUM}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": false}, "rollback_configuration_8": {"n": 8, "node": "niam_sbc_server", "desc": "Attempt ${ATTEMPT} - re-upload rollback signaling to repo", "cmd": "printf \"put /storage/Signaling_${NODE_NAME}_${DATE}_Rollback.xml ${BACK_UP_LOCATION_REPO}/Signaling_${DATE}_Rollback.xml\\nbye\\n\" | sftp -o StrictHostKeyChecking=no admin@${repo_server_ip}", "when": "", "skip": "", "crit": "${FILECOPY != \"\"}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": true}, "rollback_configuration_9": {"n": 9, "node": "repo_server", "desc": "Attempt ${ATTEMPT} - re-verify checksum", "cmd": "sha256sum ${BACK_UP_LOCATION_REPO}/Signaling_${DATE}_Rollback.xml | awk '{print $1}'", "when": "", "skip": "", "crit": "${ROLLBACKNODECHECKSUM == REPOCHECKSUM}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": true}, "rollback_configuration_10": {"n": 10, "node": "locals", "desc": "Abort if checksum still mismatched after ${RETRY_COUNT} retries", "cmd": "echo checksum-guard", "when": "${CHECKSUM_STATUS != \"SUCCESS\"}", "skip": "", "crit": "${CHECKSUM_STATUS == \"SUCCESS\"}", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": false}, "rollback_configuration_11": {"n": 11, "node": "locals", "desc": "Finding and Comparing Checksum for Uploaded File", "cmd": "sha256sum ${LOCAL_PATH}/Signaling_${DATE}_Rollback.xml | awk '{print $1}'", "when": "", "skip": "", "crit": "${REPOCHECKSUM == LOCALCHECKSUM}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": false}, "rollback_configuration_12": {"n": 12, "node": "locals", "desc": "Attempt ${ATTEMPT} - re-verify checksum", "cmd": "sha256sum ${LOCAL_PATH}/Signaling_${DATE}_Rollback.xml | awk '{print $1}'", "when": "", "skip": "", "crit": "${REPOCHECKSUM == LOCALCHECKSUM}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": true}, "rollback_configuration_13": {"n": 13, "node": "locals", "desc": "Abort if checksum still mismatched after ${RETRY_COUNT} retries", "cmd": "echo checksum-guard", "when": "${CHECKSUM_STATUS != \"SUCCESS\"}", "skip": "", "crit": "${CHECKSUM_STATUS == \"SUCCESS\"}", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": false}, "rollback_configuration_14": {"n": 14, "node": "locals", "desc": "Determine rollback scope for ${table_row.table}", "cmd": "echo rollback-scope-check", "when": "", "skip": "", "crit": "", "sets": [], "fail": "stop", "failtext": "run stops here (inherited)", "loop": true}, "rollback_configuration_15": {"n": 15, "node": "locals", "desc": "validate and generate network configuration xml from CIQ data according to table", "cmd": "python ${ROLLBACK_PYTHON_SCRIPT_PATH}/netconf_generate_rollback_xml.py --json \"${INPUT_JSON_FILE_NAME}\" --node ${NODE_NAME} --xmlns \"${xmlns}\" --primary-keys \"${primary_keys}\" --base \"${LOCAL_PATH}/Signaling_Activity.xml\" --current \"${LOCAL_PATH}/Signaling_${DATE}_Rollback.xml\" --output ${LOCAL_PATH}/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Rollback.xml --table ${table_row.table} --group ${config_seq_row.configSeq}", "when": "${TABLE_ROLLBACK_APPLICABLE == \"true\"}", "skip": "", "crit": "${XMLGENSTATUS == \"SUCCESS\" || PARTIAL != \"\"}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": true}, "rollback_configuration_16": {"n": 16, "node": "locals", "desc": "Determine rollback scope for ${table_row.table}", "cmd": "echo rollback-scope-check", "when": "", "skip": "", "crit": "", "sets": [], "fail": "stop", "failtext": "run stops here (inherited)", "loop": true}, "rollback_configuration_17": {"n": 17, "node": "niam_sbc_server", "desc": "Take full table configuration xml for ${table_row.table} before rollback execution", "cmd": "/opt/sbc/CurrRel/scripts/netconfprov/netconfprov --plane signaling --user ${USER} --pemfile /root/.ssh/id_rsa --table ${table_row.table} --read > /storage/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Rollback_Precheck.xml", "when": "", "skip": "", "crit": "${ERRORMSG == \"\" && ROOTNOTALLOWED == \"\"}", "sets": ["ROLLBACK_REQUIRED = true"], "fail": "rb", "failtext": "ROLLBACK_REQUIRED = true", "loop": true}, "rollback_configuration_18": {"n": 18, "node": "niam_sbc_server", "desc": "Read configuration xml content for ${table_row.table} for prevalidation", "cmd": "cat /storage/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Rollback_Precheck.xml; echo", "when": "", "skip": "", "crit": "${SIGNALINGXML != \"\"}", "sets": ["ROLLBACK_REQUIRED = true"], "fail": "rb", "failtext": "ROLLBACK_REQUIRED = true", "loop": true}, "rollback_configuration_19": {"n": 19, "node": "locals", "desc": "creating network configuration xml for ${table_row.table} on locals", "cmd": "echo '${base64:SIGNALINGXML}' | base64 -d > ${LOCAL_PATH}/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Rollback_Precheck.xml && echo WRITE_OK", "when": "", "skip": "", "crit": "", "sets": ["ROLLBACK_REQUIRED = true"], "fail": "rb", "failtext": "ROLLBACK_REQUIRED = true", "loop": true}, "rollback_configuration_20": {"n": 20, "node": "locals", "desc": "validate network configuration XML generation to ensure data integrity and prevent the creation of invalid or inconsistent XML.", "cmd": "xmllint --noout ${LOCAL_PATH}/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Rollback.xml && echo xml_valid", "when": "", "skip": "", "crit": "", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": true}, "rollback_configuration_21": {"n": 21, "node": "locals", "desc": "Read generate rollback network configuration xml from CIQ data for ${table_row.table}", "cmd": "cat ${LOCAL_PATH}/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Rollback.xml; echo", "when": "${TABLE_ROLLBACK_APPLICABLE == \"true\"}", "skip": "", "crit": "${SIGNALINGXML != \"\"}", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": true}, "rollback_configuration_22": {"n": 22, "node": "niam_sbc_server", "desc": "creating rollback network configuration xml for ${table_row.table} on node", "cmd": "echo '${base64:SIGNALINGXML}' | base64 -d > /storage/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Rollback.xml && echo WRITE_OK", "when": "${TABLE_ROLLBACK_APPLICABLE == \"true\"}", "skip": "", "crit": "", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": true}, "rollback_configuration_23": {"n": 23, "node": "niam_sbc_server", "desc": "validate network configuration XML generation to ensure data integrity and prevent the creation of invalid or inconsistent XML.", "cmd": "xmllint --noout /storage/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Rollback.xml && echo xml_valid", "when": "", "skip": "", "crit": "", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": true}, "rollback_configuration_24": {"n": 24, "node": "niam_sbc_server", "desc": "Execute NETCONF XML on SBC - ${table_row.table} (root)", "cmd": "/opt/sbc/CurrRel/scripts/netconfprov/netconfprov --plane signaling --user ${USER} --pemfile /root/.ssh/id_rsa --onerror abort /storage/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Rollback.xml", "when": "${TABLE_ROLLBACK_APPLICABLE == \"true\"}", "skip": "", "crit": "${NETCONFABORTED == \"\" && ROOTNOTALLOWED == \"\"}", "sets": ["NETCONF_ROOT_OK = false"], "fail": "stop", "failtext": "run stops here", "loop": true}, "rollback_configuration_25": {"n": 25, "node": "niam_sbc_server", "desc": "Take full table configuration xml for ${table_row.table} (root)", "cmd": "/opt/sbc/CurrRel/scripts/netconfprov/netconfprov --plane signaling --user ${USER} --pemfile /root/.ssh/id_rsa --table ${table_row.table} --read > /storage/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Rollback_Postcheck.xml", "when": "${TABLE_ROLLBACK_APPLICABLE == \"true\"}", "skip": "", "crit": "${ERRORMSG == \"\" && ROOTNOTALLOWED == \"\"}", "sets": ["ROLLBACK_POSTCHECK = false"], "fail": "warn", "failtext": "ROLLBACK_POSTCHECK = false", "loop": true}, "rollback_configuration_26": {"n": 26, "node": "niam_sbc_server", "desc": "validate network configuration XML generation to ensure data integrity and prevent the creation of invalid or inconsistent XML.", "cmd": "xmllint --noout /storage/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Rollback_Postcheck.xml && echo xml_valid", "when": "${TABLE_ROLLBACK_APPLICABLE == \"true\" && ROLLBACK_POSTCHECK != \"false\"}", "skip": "", "crit": "", "sets": ["ROLLBACK_POSTCHECK = false"], "fail": "warn", "failtext": "ROLLBACK_POSTCHECK = false", "loop": true}, "rollback_configuration_27": {"n": 27, "node": "niam_sbc_server", "desc": "Read configuration xml content for ${table_row.table} for rollback postcheck", "cmd": "cat /storage/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Rollback_Postcheck.xml; echo", "when": "${TABLE_ROLLBACK_APPLICABLE == \"true\" && ROLLBACK_POSTCHECK != \"false\"}", "skip": "", "crit": "${SIGNALINGXML != \"\"}", "sets": ["ROLLBACK_POSTCHECK = false"], "fail": "warn", "failtext": "ROLLBACK_POSTCHECK = false", "loop": true}, "rollback_configuration_28": {"n": 28, "node": "locals", "desc": "creating network configuration xml for ${table_row.table} on locals", "cmd": "echo '${base64:SIGNALINGXML}' | base64 -d > ${LOCAL_PATH}/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Rollback_Postcheck.xml && echo WRITE_OK", "when": "${TABLE_ROLLBACK_APPLICABLE == \"true\" && ROLLBACK_POSTCHECK != \"false\"}", "skip": "", "crit": "", "sets": ["ROLLBACK_POSTCHECK = false"], "fail": "warn", "failtext": "ROLLBACK_POSTCHECK = false", "loop": true}, "rollback_configuration_29": {"n": 29, "node": "locals", "desc": "validate network configuration XML generation to ensure data integrity and prevent the creation of invalid or inconsistent XML.", "cmd": "xmllint --noout ${LOCAL_PATH}/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Rollback_Postcheck.xml && echo xml_valid", "when": "${TABLE_ROLLBACK_APPLICABLE == \"true\" && ROLLBACK_POSTCHECK != \"false\"}", "skip": "", "crit": "", "sets": ["ROLLBACK_POSTCHECK = false"], "fail": "warn", "failtext": "ROLLBACK_POSTCHECK = false", "loop": true}, "rollback_configuration_30": {"n": 30, "node": "locals", "desc": "verify all the changes", "cmd": "python ${ROLLBACK_PYTHON_SCRIPT_PATH}/netconf_generate_rollback_xml.py --json \"${INPUT_JSON_FILE_NAME}\" --node ${NODE_NAME} --xmlns \"${xmlns}\" --primary-keys \"${primary_keys}\" --current \"${LOCAL_PATH}/${table_row.table}_${config_seq_row.configSeq}_${DATE}_Rollback_Postcheck.xml\" --table ${table_row.table} --postcheck --group ${config_seq_row.configSeq}", "when": "${TABLE_ROLLBACK_APPLICABLE == \"true\" && ROLLBACK_POSTCHECK != \"false\"}", "skip": "", "crit": "${POSTCHECKSTATUS == \"POSTCHECK PASSED\"}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": true}, "rollback_configuration_31": {"n": 31, "node": "niam_sbc_server", "desc": "date", "cmd": "date +%Y-%m-%d_%H-%M-%S", "when": "", "skip": "", "crit": "", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": true}, "rollback_configuration_32": {"n": 32, "node": "niam_sbc_server", "desc": "Take full signaling-plane network configuration xml (root)", "cmd": "/opt/sbc/CurrRel/scripts/netconfprov/netconfprov --plane signaling --user ${USER} --pemfile /root/.ssh/id_rsa --readall > /storage/Signaling_${NODE_NAME}_${DATE}_Rollback.xml", "when": "", "skip": "", "crit": "${ERRORMSG == \"\" && ROOTNOTALLOWED == \"\"}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": true}, "rollback_configuration_33": {"n": 33, "node": "niam_sbc_server", "desc": "Take full signaling-plane network configuration xml (netconfcli fallback)", "cmd": "/opt/sbc/CurrRel/scripts/netconfprov/netconfprov --plane signaling --user netconfcli --pemfile /var/webui/.ssh/id_rsa --readall > /storage/Signaling_${NODE_NAME}_${DATE}_Rollback.xml", "when": "${NETCONF_ROOT_OK == \"false\"}", "skip": "", "crit": "${ERRORMSG == \"\"}", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": true}, "rollback_configuration_34": {"n": 34, "node": "niam_sbc_server", "desc": "Finding Checksum for the backup file ", "cmd": "sha256sum /storage/Signaling_${NODE_NAME}_${DATE}_Rollback.xml | awk '{print $1}'", "when": "", "skip": "", "crit": "", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": true}, "rollback_configuration_35": {"n": 35, "node": "niam_sbc_server", "desc": "SFTP upload from ${NODE_NAME} to repository server.", "cmd": "printf \"put /storage/Signaling_${NODE_NAME}_${DATE}_Rollback.xml ${BACK_UP_LOCATION_REPO}/Signaling_${DATE}_Rollback.xml\\nbye\\n\" | sftp -o StrictHostKeyChecking=no admin@${repo_server_ip}", "when": "", "skip": "", "crit": "${FILECOPY != \"\"}", "sets": [], "fail": "stop", "failtext": "run stops here (inherited)", "loop": true}, "rollback_configuration_36": {"n": 36, "node": "repo_server", "desc": "Finding and Comparing Checksum for Uploaded File", "cmd": "sha256sum ${BACK_UP_LOCATION_REPO}/Signaling_${DATE}_Rollback.xml | awk '{print $1}'", "when": "", "skip": "", "crit": "${ROLLBACKNODECHECKSUM == REPOCHECKSUM}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": true}, "rollback_configuration_37": {"n": 37, "node": "niam_sbc_server", "desc": "Attempt ${ATTEMPT} - re-upload rollback signaling to repo", "cmd": "printf \"put /storage/Signaling_${NODE_NAME}_${DATE}_Rollback.xml ${BACK_UP_LOCATION_REPO}/Signaling_${DATE}_Rollback.xml\\nbye\\n\" | sftp -o StrictHostKeyChecking=no admin@${repo_server_ip}", "when": "", "skip": "", "crit": "${FILECOPY != \"\"}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": true}, "rollback_configuration_38": {"n": 38, "node": "repo_server", "desc": "Attempt ${ATTEMPT} - re-verify checksum", "cmd": "sha256sum ${BACK_UP_LOCATION_REPO}/Signaling_${DATE}_Rollback.xml | awk '{print $1}'", "when": "", "skip": "", "crit": "${ROLLBACKNODECHECKSUM == REPOCHECKSUM}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": true}, "rollback_configuration_39": {"n": 39, "node": "locals", "desc": "Abort if checksum still mismatched after ${RETRY_COUNT} retries", "cmd": "echo checksum-guard", "when": "${CHECKSUM_STATUS != \"SUCCESS\"}", "skip": "", "crit": "${CHECKSUM_STATUS == \"SUCCESS\"}", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": true}, "rollback_configuration_40": {"n": 40, "node": "locals", "desc": "Finding and Comparing Checksum for Uploaded File", "cmd": "sha256sum ${LOCAL_PATH}/Signaling_${DATE}_Rollback.xml | awk '{print $1}'", "when": "", "skip": "", "crit": "${REPOCHECKSUM == LOCALCHECKSUM}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": true}, "rollback_configuration_41": {"n": 41, "node": "locals", "desc": "Attempt ${ATTEMPT} - re-verify checksum", "cmd": "sha256sum ${LOCAL_PATH}/Signaling_${DATE}_Rollback.xml | awk '{print $1}'", "when": "", "skip": "", "crit": "${REPOCHECKSUM == LOCALCHECKSUM}", "sets": [], "fail": "warn", "failtext": "recorded, run continues", "loop": true}, "rollback_configuration_42": {"n": 42, "node": "locals", "desc": "Abort if checksum still mismatched after ${RETRY_COUNT} retries", "cmd": "echo checksum-guard", "when": "${CHECKSUM_STATUS != \"SUCCESS\"}", "skip": "", "crit": "${CHECKSUM_STATUS == \"SUCCESS\"}", "sets": [], "fail": "stop", "failtext": "run stops here", "loop": true}};</script>
 <script>
 (function () {
   var MIN = 0.15, MAX = 4;
+  var INFO = window.STEP_INFO || {};
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c];
+    });
+  }
 
   function setup(canvas) {
     var viewport = canvas.querySelector('.viewport');
     var stage    = canvas.querySelector('.stage');
     var readout  = canvas.querySelector('.zoom');
+    var svg      = stage.querySelector('svg');
     var s = { k: 1, x: 20, y: 20 };
+    var nat = { w: 0, h: 0 };
+
+    if (svg) {                       // measure once, at scale 1, before any transform
+      var b = svg.getBoundingClientRect();
+      nat = { w: b.width, h: b.height };
+    }
+
+    var mm = canvas.querySelector('.minimap');
+    var mmView = mm && mm.querySelector('.mmview');
 
     function apply() {
       stage.style.transform = 'translate(' + s.x + 'px,' + s.y + 'px) scale(' + s.k + ')';
       if (readout) readout.textContent = Math.round(s.k * 100) + '%';
+      drawMinimap();
     }
-    function natural() {
-      var svg = stage.querySelector('svg');
-      if (!svg) return { w: 0, h: 0 };
-      var r = svg.getBoundingClientRect();
-      return { w: r.width / s.k, h: r.height / s.k };
+    function drawMinimap() {
+      if (!mm || !mmView || !nat.w) return;
+      var r = viewport.getBoundingClientRect();
+      var mb = mm.getBoundingClientRect();
+      var f = Math.min(mb.width / nat.w, mb.height / nat.h);
+      var ox = (mb.width - nat.w * f) / 2, oy = (mb.height - nat.h * f) / 2;
+      mmView.style.left   = (ox + (-s.x / s.k) * f) + 'px';
+      mmView.style.top    = (oy + (-s.y / s.k) * f) + 'px';
+      mmView.style.width  = Math.max(6, (r.width  / s.k) * f) + 'px';
+      mmView.style.height = Math.max(6, (r.height / s.k) * f) + 'px';
     }
     function zoomAt(cx, cy, factor) {
       var k = Math.min(MAX, Math.max(MIN, s.k * factor));
@@ -3106,39 +3240,63 @@ Expecting `+Qe.join(", ")+", got '"+(this.terminals_[Ne]||Ne)+"'":Dt="Parse erro
       zoomAt(r.width / 2, r.height / 2, factor);
     }
     function fit() {
-      var n = natural(), r = viewport.getBoundingClientRect();
-      if (!n.w || !n.h) return;
-      var k = Math.min((r.width - 40) / n.w, (r.height - 40) / n.h);
+      var r = viewport.getBoundingClientRect();
+      if (!nat.w || !nat.h) return;
+      var k = Math.min((r.width - 40) / nat.w, (r.height - 40) / nat.h);
       s.k = Math.min(MAX, Math.max(MIN, k));
-      s.x = (r.width - n.w * s.k) / 2;
+      s.x = (r.width - nat.w * s.k) / 2;
+      s.y = 20;
+      apply();
+    }
+    function open() {
+      // Fitting a 100-step phase into 620px lands near 15% - legible to nobody.
+      // These flows read top-down, so open at actual size and only scale back if
+      // the diagram is too WIDE for the viewport. Vertical is what panning is for,
+      // and Fit is one click (or 'f') away.
+      var r = viewport.getBoundingClientRect();
+      s.k = Math.min(1, (r.width - 40) / nat.w);
+      s.x = Math.max(20, (r.width - nat.w * s.k) / 2);
       s.y = 20;
       apply();
     }
     function reset() { s.k = 1; s.x = 20; s.y = 20; apply(); }
 
+    function centreOn(el) {
+      var sb = stage.getBoundingClientRect(), eb = el.getBoundingClientRect();
+      var cx = (eb.left + eb.width / 2 - sb.left) / s.k;
+      var cy = (eb.top + eb.height / 2 - sb.top) / s.k;
+      var r = viewport.getBoundingClientRect();
+      s.x = r.width / 2 - cx * s.k;
+      s.y = r.height / 2 - cy * s.k;
+      apply();
+    }
+
+    // ---- pan / zoom -------------------------------------------------------
     viewport.addEventListener('wheel', function (e) {
       e.preventDefault();
       var r = viewport.getBoundingClientRect();
       zoomAt(e.clientX - r.left, e.clientY - r.top, e.deltaY < 0 ? 1.12 : 1 / 1.12);
     }, { passive: false });
 
-    var dragging = false, px = 0, py = 0;
+    var dragging = false, moved = 0, px = 0, py = 0;
     viewport.addEventListener('pointerdown', function (e) {
-      dragging = true; px = e.clientX; py = e.clientY;
+      if (e.target.closest('.drawer') || e.target.closest('.minimap')) return;
+      dragging = true; moved = 0; px = e.clientX; py = e.clientY;
       viewport.classList.add('grabbing');
       viewport.setPointerCapture(e.pointerId);
     });
     viewport.addEventListener('pointermove', function (e) {
       if (!dragging) return;
-      s.x += e.clientX - px; s.y += e.clientY - py;
-      px = e.clientX; py = e.clientY; apply();
+      var dx = e.clientX - px, dy = e.clientY - py;
+      moved += Math.abs(dx) + Math.abs(dy);
+      s.x += dx; s.y += dy; px = e.clientX; py = e.clientY; apply();
     });
-    function stop(e) {
+    function stopDrag(e) {
       dragging = false; viewport.classList.remove('grabbing');
       try { viewport.releasePointerCapture(e.pointerId); } catch (_) {}
     }
-    viewport.addEventListener('pointerup', stop);
-    viewport.addEventListener('pointercancel', stop);
+    viewport.addEventListener('pointerup', stopDrag);
+    viewport.addEventListener('pointercancel', stopDrag);
     viewport.addEventListener('dblclick', function (e) {
       e.preventDefault();
       if (window.getSelection) window.getSelection().removeAllRanges();
@@ -3146,6 +3304,157 @@ Expecting `+Qe.join(", ")+", got '"+(this.terminals_[Ne]||Ne)+"'":Dt="Parse erro
     });
     viewport.addEventListener('selectstart', function (e) { e.preventDefault(); });
 
+    // ---- click a command box for its detail -------------------------------
+    var drawer = canvas.querySelector('.drawer');
+    function closeDrawer() {
+      if (drawer) drawer.classList.remove('open');
+      stage.querySelectorAll('g.node.picked').forEach(function (n) {
+        n.classList.remove('picked');
+      });
+    }
+    function showStep(id, g) {
+      var d = INFO[id];
+      if (!d || !drawer) return;
+      stage.querySelectorAll('g.node.picked').forEach(function (n) {
+        n.classList.remove('picked');
+      });
+      g.classList.add('picked');
+      var tag = d.fail === 'stop' ? '<span class="tag tag-stop">stops the run</span>'
+              : d.fail === 'rb'   ? '<span class="tag tag-rb">arms rollback</span>'
+              :                     '<span class="tag tag-cont">run continues</span>';
+      var h = '<h5>Command</h5><pre>' + esc(d.cmd) + '</pre>';
+      h += '<h5>Target</h5><p class="kv"><b>' + esc(d.node) + '</b>' +
+           (d.loop ? ' · inside a retry loop' : '') + '</p>';
+      if (d.when)  h += '<h5>Runs when</h5><pre>' + esc(d.when) + '</pre>';
+      if (d.skip)  h += '<h5>Skipped when</h5><pre>' + esc(d.skip) + '</pre>';
+      if (d.crit)  h += '<h5>Passes if</h5><pre>' + esc(d.crit) + '</pre>';
+      if (d.sets && d.sets.length) {
+        h += '<h5>On failure sets</h5><p class="kv">' +
+             d.sets.map(function (x) { return '<b>' + esc(x) + '</b>'; }).join('<br>') + '</p>';
+      }
+      h += '<h5>On failure</h5><p class="kv">' + tag +
+           ' <span style="margin-left:6px">' + esc(d.failtext || '') + '</span></p>';
+      drawer.querySelector('.n').textContent = d.n;
+      drawer.querySelector('.t').textContent = d.desc || d.node;
+      drawer.querySelector('.body').innerHTML = h;
+      drawer.classList.add('open');
+    }
+    stage.addEventListener('click', function (e) {
+      if (moved > 4) return;                       // that was a pan, not a click
+      var g = e.target.closest('g.node');
+      if (!g) return;
+      var id = (g.id || '').replace(/^flowchart-/, '').replace(/-\d+$/, '');
+      if (INFO[id]) showStep(id, g); else closeDrawer();
+    });
+    if (drawer) {
+      drawer.querySelector('button').addEventListener('click', closeDrawer);
+    }
+
+    // ---- search ------------------------------------------------------------
+    var find = canvas.querySelector('input.find');
+    var found = canvas.querySelector('.found');
+    var hits = [], at = -1;
+    function runFind() {
+      var q = (find.value || '').trim().toLowerCase();
+      stage.querySelectorAll('g.node.hit').forEach(function (n) { n.classList.remove('hit'); });
+      hits = []; at = -1;
+      if (!q) {
+        stage.classList.remove('filtering');
+        found.textContent = '';
+        return;
+      }
+      stage.querySelectorAll('g.node').forEach(function (g) {
+        // The visible label is wrapped and may be elided, so searching only the
+        // rendered text misses the tail of long commands. Match the full command
+        // and description from STEP_INFO as well.
+        var id = (g.id || '').replace(/^flowchart-/, '').replace(/-\d+$/, '');
+        var d = INFO[id];
+        var hay = (g.textContent || '');
+        if (d) hay += ' ' + d.cmd + ' ' + d.desc + ' ' + d.node;
+        if (hay.toLowerCase().indexOf(q) >= 0) {
+          g.classList.add('hit'); hits.push(g);
+        }
+      });
+      stage.classList.add('filtering');
+      found.textContent = hits.length ? ('1/' + hits.length) : 'no match';
+      if (hits.length) { at = 0; centreOn(hits[0]); }
+    }
+    function step(dir) {
+      if (!hits.length) return;
+      at = (at + dir + hits.length) % hits.length;
+      found.textContent = (at + 1) + '/' + hits.length;
+      centreOn(hits[at]);
+    }
+    if (find) {
+      var t;
+      find.addEventListener('input', function () {
+        clearTimeout(t); t = setTimeout(runFind, 160);
+      });
+      find.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); step(e.shiftKey ? -1 : 1); }
+        if (e.key === 'Escape') { find.value = ''; runFind(); find.blur(); }
+      });
+    }
+
+    // ---- minimap ------------------------------------------------------------
+    if (mm && svg) {
+      var clone = svg.cloneNode(true);
+      clone.removeAttribute('id');
+      clone.setAttribute('width', '100%');
+      clone.setAttribute('height', '100%');
+      clone.setAttribute('viewBox', '0 0 ' + nat.w + ' ' + nat.h);
+      clone.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+      mm.insertBefore(clone, mmView);
+      mm.addEventListener('click', function (e) {
+        var mb = mm.getBoundingClientRect();
+        var f = Math.min(mb.width / nat.w, mb.height / nat.h);
+        var ox = (mb.width - nat.w * f) / 2, oy = (mb.height - nat.h * f) / 2;
+        var dx = (e.clientX - mb.left - ox) / f, dy = (e.clientY - mb.top - oy) / f;
+        var r = viewport.getBoundingClientRect();
+        s.x = r.width / 2 - dx * s.k;
+        s.y = r.height / 2 - dy * s.k;
+        apply();
+      });
+    }
+
+    // ---- export --------------------------------------------------------------
+    function download(href, name) {
+      var a = document.createElement('a');
+      a.href = href; a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+    }
+    function svgText() {
+      var c = svg.cloneNode(true);
+      c.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+      c.setAttribute('width', nat.w); c.setAttribute('height', nat.h);
+      var st = document.createElementNS('http://www.w3.org/2000/svg', 'style');
+      st.textContent = 'text,span,div,p{font-family:Segoe UI,system-ui,sans-serif;' +
+                       'color:#10243a;fill:#10243a;}';
+      c.insertBefore(st, c.firstChild);
+      return new XMLSerializer().serializeToString(c);
+    }
+    var base = (canvas.getAttribute('data-name') || 'phase').replace(/[^\w.-]+/g, '_');
+    function exportSvg() {
+      download('data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgText()),
+               base + '.svg');
+    }
+    function exportPng() {
+      var scale = 2, img = new Image();
+      img.onload = function () {
+        var cv = document.createElement('canvas');
+        cv.width = nat.w * scale; cv.height = nat.h * scale;
+        var ctx = cv.getContext('2d');
+        ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cv.width, cv.height);
+        ctx.setTransform(scale, 0, 0, scale, 0, 0);
+        ctx.drawImage(img, 0, 0);
+        try { download(cv.toDataURL('image/png'), base + '.png'); }
+        catch (err) { console.error('png export failed', err); exportSvg(); }
+      };
+      img.onerror = function () { exportSvg(); };
+      img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgText());
+    }
+
+    // ---- toolbar -------------------------------------------------------------
     canvas.querySelectorAll('button[data-act]').forEach(function (b) {
       b.addEventListener('click', function () {
         var a = b.getAttribute('data-act');
@@ -3153,6 +3462,11 @@ Expecting `+Qe.join(", ")+", got '"+(this.terminals_[Ne]||Ne)+"'":Dt="Parse erro
         if (a === 'out')   zoomCentre(1 / 1.25);
         if (a === 'fit')   fit();
         if (a === 'reset') reset();
+        if (a === 'svg')   exportSvg();
+        if (a === 'png')   exportPng();
+        if (a === 'map') {
+          if (mm) { mm.classList.toggle('hidden'); b.classList.toggle('on', !mm.classList.contains('hidden')); }
+        }
         if (a === 'full') {
           if (document.fullscreenElement) document.exitFullscreen();
           else if (canvas.requestFullscreen) canvas.requestFullscreen();
@@ -3163,18 +3477,36 @@ Expecting `+Qe.join(", ")+", got '"+(this.terminals_[Ne]||Ne)+"'":Dt="Parse erro
       if (document.fullscreenElement === canvas) setTimeout(fit, 60);
     });
 
-    fit();
+    // ---- keyboard (only while the pointer is over this canvas) --------------
+    var hot = false;
+    canvas.addEventListener('mouseenter', function () { hot = true; });
+    canvas.addEventListener('mouseleave', function () { hot = false; });
+    document.addEventListener('keydown', function (e) {
+      if (!hot) return;
+      var typing = /^(INPUT|TEXTAREA)$/.test((e.target.tagName || ''));
+      if (e.key === 'Escape') { closeDrawer(); if (find) { find.value = ''; runFind(); } return; }
+      if (typing) return;
+      if (e.key === '/') { e.preventDefault(); if (find) find.focus(); }
+      if (e.key === '+' || e.key === '=') zoomCentre(1.25);
+      if (e.key === '-') zoomCentre(1 / 1.25);
+      if (e.key === '0') reset();
+      if (e.key === 'f') fit();
+      if (e.key === 'n') step(1);
+      if (e.key === 'p') step(-1);
+    });
+
+    open();
+    window.addEventListener('resize', drawMinimap);
   }
 
-  function start() {
-    document.querySelectorAll('.canvas').forEach(setup);
-  }
+  function start() { document.querySelectorAll('.canvas').forEach(setup); }
 
   if (window.mermaid) {
     mermaid.initialize({ startOnLoad: false, securityLevel: 'loose',
                          flowchart: { useMaxWidth: false, htmlLabels: true,
-                                      padding: 10, nodeSpacing: 45, rankSpacing: 58,
-                                      diagramPadding: 24 } });
+                                      curve: 'basis',
+                                      padding: 14, nodeSpacing: 52, rankSpacing: 64,
+                                      diagramPadding: 26 } });
     mermaid.run({ querySelector: '.mermaid' }).then(start).catch(function (e) {
       console.error('mermaid render failed', e); start();
     });

@@ -40,7 +40,7 @@ python gen_command_diagram.py "<full path to the yaml>" "<name>_COMMAND_DIAGRAM.
  2. LINE-BY-LINE REFERENCE  (command, when it runs, prerequisites, what it sets)
 ===============================================================================
 
-python gen_command_reference.py <workflow.yaml> <output.html>
+python gen_command_reference.py <workflow.yaml> <output.html> [--external NAME,NAME]
 
 
 -- DPA / DLU_INSTALLATION -----------------------------------------------------
@@ -70,9 +70,53 @@ python gen_command_reference.py $yaml "$($name)_COMMAND_REFERENCE.html"
 
 
 ===============================================================================
+ FINDINGS  (the reference checks the yaml, not just documents it)
+===============================================================================
+
+ The reference opens with a Findings panel and prints the same thing on the
+ console. It cross-checks every variable READ against every variable WRITTEN
+ and reports three things that reading the yaml top-to-bottom will not reveal:
+
+   never assigned    a step gates on a variable nothing ever writes. The
+                     condition is permanently false, so the step never runs -
+                     and nothing in the log says so.
+   read before set   the only writer runs LATER than the reader, so the reader
+                     sees an empty value.
+   written, not read usually harmless, but this is where a typo hides.
+
+ When a never-assigned name closely matches a written-but-never-read name, they
+ are reported as a pair - that combination is almost always one variable with a
+ typo in one of the two places.
+
+ Real example from DPA_DLU_INSTALLATION.yaml:
+
+   ! never assigned : IMPORT_ROLLBACK_STATUS2 - read at step 105
+       (likely a typo of IMPORT_ROLLBACK_STATUS, which is written but never read)
+
+ The active node writes IMPORT_ROLLBACK_STATUS; the step after it gates on
+ IMPORT_ROLLBACK_STATUS2. Nothing writes that name, so the active node's
+ post-rollback version check can never run.
+
+ Values that come from OUTSIDE the yaml (CIQ fields, arglist keys) are not
+ assigned anywhere in it either, and that is correct. The common ones are known
+ already; declare workflow-specific ones so they stop being reported:
+
+   python gen_command_reference.py <yaml> <out.html> --external configSeq,table
+
+
+===============================================================================
  USING THE DIAGRAM  (works like draw.io)
 ===============================================================================
 
+ click a box      opens a panel with the FULL command, both gate conditions, the
+                  pass criteria, what a failure sets, and whether it stops the
+                  run. The boxes stay short on purpose - the detail lives here.
+ Find box         type to highlight matching commands and dim everything else.
+                  Searches the full command text, not just the visible label,
+                  so a match past the end of a wrapped line still counts.
+                  Enter / Shift+Enter step through the hits.
+ minimap          bottom right. Click anywhere on it to jump there. "Map" hides it.
+ SVG / PNG        download just that phase as a file.
  drag             pan around the canvas
  scroll wheel     zoom in / out at the mouse pointer
  double-click     fit the whole phase into the window
@@ -81,8 +125,15 @@ python gen_command_reference.py $yaml "$($name)_COMMAND_REFERENCE.html"
  100%             back to actual size
  Fullscreen       fill the screen (Esc to leave)
 
- Each phase has its own canvas with its own toolbar. The percentage next to
- the buttons shows the current zoom.
+ Keyboard (while the mouse is over a canvas):
+
+   /        jump to the Find box       f    fit
+   n / p    next / previous hit        0    100%
+   + / -    zoom                       Esc  close panel, clear the search
+
+ Each phase opens at actual size, scaled down only if the phase is too wide for
+ the window - these flows read top to bottom, so panning down beats starting at
+ 15% where nothing is legible. Press f or double-click for the whole phase.
 
 
 ===============================================================================
@@ -94,11 +145,16 @@ python gen_command_reference.py $yaml "$($name)_COMMAND_REFERENCE.html"
                command text.
  amber diamond a condition the engine evaluates.
                  - before a box  = the when / skip_when that decides whether
-                                   the step runs at all
+                                   the step runs at all. A step can carry BOTH:
+                                   it runs only when the `when` is true AND the
+                                   `skip_when` is false, and the diamond shows
+                                   both halves.
                  - after a box   = the validation, with pass / fail edges
  grey box      failure that is only recorded - the run carries on
  orange box    failure that sets ROLLBACK_REQUIRED = true
- red box       failure that stops the run
+ red box       failure that stops the run. "(inherited)" means the step sets no
+               on_failure of its own and takes globals.defaults.on_failure -
+               which is `stop` in these workflows.
  dashed border the step sits inside a retry loop
 
  One diagram per phase. Scroll sideways inside a diagram if it is wide.

@@ -12,6 +12,7 @@ offline with no CDN.
 """
 
 import html
+import json
 import os
 import re
 import sys
@@ -89,20 +90,87 @@ def flatten(steps, depth=0, loop=False):
             yield st, loop
 
 
-def consequence(st):
-    """What a failed validation costs: (kind, text)."""
+def consequence(st, default_on_failure="stop"):
+    """What a failed validation costs: (kind, text).
+
+    A step without its own `on_failure` inherits globals.defaults.on_failure -
+    the engine does exactly that (ExecutionOrchestrator: step.getOn_failure()
+    else globals.defaults). Reading only the step key drew inherited-stop steps
+    as harmless "run continues", which is the opposite of what happens.
+    """
     val = st.get("validation") or {}
     fail = val.get("failure") if isinstance(val, dict) else None
     vs = (fail or {}).get("vars") or {}
     if "ROLLBACK_REQUIRED" in vs and str(vs["ROLLBACK_REQUIRED"]).lower() == "true":
         return "rb", "ROLLBACK_REQUIRED = true"
-    if st.get("on_failure") == "stop":
-        return "stop", "run stops here"
+    effective = st.get("on_failure") or default_on_failure
+    if effective == "stop":
+        inherited = "" if st.get("on_failure") else " (inherited)"
+        return "stop", f"run stops here{inherited}"
     bits = [f"{k} = {v}" for k, v in vs.items()]
     return "warn", (bits[0] if bits else "recorded, run continues")
 
 
-def phase_diagram(phase_name, rows, pid):
+def gate_label(st):
+    """Label for the diamond in front of a step.
+
+    A step may carry BOTH `when` and `skip_when` - it runs only when the first
+    is true AND the second is false. Showing just one of them hides half the
+    gate, so both go in the diamond when both are present.
+    """
+    w, sw = st.get("when"), st.get("skip_when")
+    if w and sw:
+        return (f"<b>when</b><br/>{cond_label(w)}"
+                f"<br/><b>and not skip when</b><br/>{cond_label(sw)}")
+    if w:
+        return f"<b>when</b><br/>{cond_label(w)}"
+    return f"<b>skip when</b><br/>{cond_label(sw)}"
+
+
+def raw_command(st):
+    cmd = st.get("send")
+    if cmd is None and isinstance(st.get("rest"), dict):
+        r = st["rest"]
+        cmd = f'{r.get("method","GET")} {r.get("path","")}'
+    return str(cmd).strip() if cmd is not None else "(plugin step)"
+
+
+def step_info(rows, pid, default_on_failure="stop"):
+    """Per-box detail for the click-through drawer.
+
+    The boxes are deliberately short - the full command, both gate conditions and
+    the pass criteria live here instead, one click away, so nothing has to be
+    truncated on the canvas to stay readable.
+    """
+    info = {}
+    for i, (st, in_loop) in enumerate(rows, 1):
+        val = st.get("validation") or {}
+        crit = ""
+        succ = val.get("success") if isinstance(val, dict) else None
+        if isinstance(succ, dict) and isinstance(succ.get("criteria"), dict):
+            c = succ["criteria"]
+            crit = c.get("expr") or next(
+                (f"{k} of {len(c[k])} checks" for k in ("all", "any") if k in c), "")
+        fail = val.get("failure") if isinstance(val, dict) else None
+        sets = [f"{k} = {v}" for k, v in ((fail or {}).get("vars") or {}).items()]
+        kind, text = consequence(st, default_on_failure)
+        info[f"{pid}_{i}"] = {
+            "n": i,
+            "node": str(st.get("node", "local")),
+            "desc": st.get("command_description") or "",
+            "cmd": raw_command(st),
+            "when": st.get("when") or "",
+            "skip": st.get("skip_when") or "",
+            "crit": crit,
+            "sets": sets,
+            "fail": kind,
+            "failtext": text,
+            "loop": bool(in_loop),
+        }
+    return info
+
+
+def phase_diagram(phase_name, rows, pid, default_on_failure="stop"):
     """Mermaid source for one phase."""
     L = []
     A = L.append
@@ -146,8 +214,7 @@ def phase_diagram(phase_name, rows, pid):
         cond = st.get("when") or st.get("skip_when")
         if cond:
             gid = f"{sid}g"
-            kind = "when" if st.get("when") else "skip when"
-            A(f'  {gid}{{"<b>{kind}</b><br/>{cond_label(cond)}"}}')
+            A(f'  {gid}{{"{gate_label(st)}"}}')
             gate_class.append(gid)
             A(f'  {gid} -- "no" --> {sid}skip["step skipped"]')
             ok_class.append(f"{sid}skip")
@@ -167,7 +234,7 @@ def phase_diagram(phase_name, rows, pid):
             A(f'  {vid}{{"{cond_label(crit) or "validation"}"}}')
             gate_class.append(vid)
             A(f"  {sid} --> {vid}")
-            kind, text = consequence(st)
+            kind, text = consequence(st, default_on_failure)
             fid = f"{sid}f"
             A(f'  {fid}["{clean(text, 60)}"]')
             if kind == "rb":
@@ -312,12 +379,84 @@ code{font-family:var(--mono);font-size:12.5px;background:var(--code-bg);
 .stage svg .nodeLabel,.stage svg .edgeLabel,.stage svg .label,
 .stage svg text,.stage svg span,.stage svg p{color:#10243a!important;
  fill:#10243a!important;}
-.stage svg .edgeLabel{background:#fff!important;}
+.stage svg .edgeLabel{background:transparent!important;}
 .stage svg .edgeLabel rect{fill:#fff!important;opacity:1!important;}
-.stage svg .edgeLabel foreignObject div{background:#fff;padding:0 3px;
- border-radius:3px;}
+
+/* Mermaid measures each label, sizes a foreignObject to that measurement, then
+   clips anything outside it. Bold runs (<b>) and any padding we add afterwards
+   render WIDER than what was measured, so the last glyph was being sliced off -
+   "fail" showed as "fai", "5. node1" as "5. node". Letting the foreignObject
+   overflow costs nothing visually and ends the clipping. */
+.stage svg foreignObject{overflow:visible!important;}
+.stage svg .nodeLabel,.stage svg .edgeLabel,
+.stage svg .nodeLabel div,.stage svg .edgeLabel div{overflow:visible!important;}
+.stage svg .edgeLabel foreignObject div{background:#fff;border-radius:3px;
+ /* visual breathing room that does NOT widen the measured box */
+ box-shadow:0 0 0 3px #fff;}
 .stage svg .nodeLabel b{font-weight:700;}
 .stage svg .nodeLabel i{font-style:italic;opacity:.75;}
+
+/* --- highlight / dim states driven by search and selection --------------- */
+.stage svg g.node,.stage svg g.edgeLabel,.stage svg .edgePath{transition:opacity .12s;}
+.stage.filtering svg g.node,.stage.filtering svg .edgePath,
+.stage.filtering svg g.edgeLabel{opacity:.13;}
+.stage.filtering svg g.node.hit{opacity:1;}
+.stage svg g.node.hit rect,.stage svg g.node.hit polygon{stroke-width:3px!important;}
+.stage svg g.node.picked rect,.stage svg g.node.picked polygon{
+ stroke:#b02a6b!important;stroke-width:3.5px!important;}
+.stage svg g.node{cursor:pointer;}
+
+/* --- search box in the toolbar ------------------------------------------- */
+.toolbar input.find{font-family:var(--sans);font-size:12.5px;color:var(--ink);
+ background:var(--panel);border:1px solid var(--rule);border-radius:6px;
+ padding:4px 9px;width:170px;}
+.toolbar input.find:focus{outline:2px solid var(--accent);outline-offset:1px;
+ border-color:var(--accent);}
+.toolbar .found{font-size:11.5px;color:var(--dim);min-width:64px;
+ font-variant-numeric:tabular-nums;}
+.toolbar button.on{background:var(--accent);border-color:var(--accent);color:#fff;}
+
+/* --- minimap -------------------------------------------------------------- */
+.minimap{position:absolute;right:12px;bottom:12px;width:168px;height:126px;
+ background:rgba(255,255,255,.94);border:1px solid var(--rule);border-radius:8px;
+ box-shadow:var(--shadow);overflow:hidden;cursor:pointer;z-index:5;}
+.minimap.hidden{display:none;}
+.minimap svg{width:100%;height:100%;display:block;}
+.minimap .mmview{position:absolute;border:2px solid var(--accent);
+ background:rgba(42,96,153,.12);pointer-events:none;border-radius:2px;}
+
+/* --- step detail drawer --------------------------------------------------- */
+.drawer{position:absolute;top:0;right:0;width:340px;max-width:86%;height:100%;
+ background:var(--panel);border-left:1px solid var(--rule);box-shadow:var(--shadow);
+ transform:translateX(102%);transition:transform .18s ease;z-index:8;
+ display:flex;flex-direction:column;}
+.drawer.open{transform:none;}
+.drawer header{display:flex;align-items:center;gap:8px;padding:10px 12px;
+ border-bottom:1px solid var(--rule);}
+.drawer header .n{font-family:var(--mono);font-size:11.5px;font-weight:700;
+ background:var(--accent);color:#fff;border-radius:4px;padding:2px 7px;}
+.drawer header .t{flex:1;font-weight:600;font-size:13px;}
+.drawer header button{border:1px solid var(--rule);background:transparent;
+ color:var(--ink);border-radius:6px;cursor:pointer;padding:2px 8px;font-size:14px;}
+.drawer .body{padding:12px;overflow:auto;font-size:13px;}
+.drawer h5{margin:14px 0 4px;font-size:10.5px;letter-spacing:.09em;
+ text-transform:uppercase;color:var(--dim);}
+.drawer h5:first-child{margin-top:0;}
+.drawer pre{font-family:var(--mono);font-size:12px;background:var(--code-bg);
+ color:var(--code-ink);padding:9px 10px;border-radius:6px;margin:0;
+ white-space:pre-wrap;word-break:break-word;}
+.drawer .kv{color:var(--dim);}
+.drawer .kv b{color:var(--ink);font-weight:600;}
+.drawer .tag{display:inline-block;font-size:10px;font-weight:700;padding:2px 7px;
+ border-radius:20px;text-transform:uppercase;letter-spacing:.04em;}
+.tag-stop{background:rgba(169,50,38,.14);color:#a93226;}
+.tag-rb{background:rgba(180,83,9,.16);color:#b45309;}
+.tag-cont{background:rgba(30,126,69,.14);color:#1e7e45;}
+
+.hint-row{margin:8px 2px 0;font-size:12px;color:var(--dim);}
+.hint-row kbd{font-family:var(--mono);font-size:11px;background:var(--code-bg);
+ color:var(--code-ink);border:1px solid var(--rule);border-bottom-width:2px;
+ border-radius:4px;padding:0 5px;}
 
 .legend{display:flex;flex-wrap:wrap;gap:9px 22px;margin:16px 0 0;font-size:13.5px;
  color:var(--dim);}
@@ -336,22 +475,45 @@ footer{margin-top:40px;padding-top:16px;border-top:1px solid var(--rule);
 PANZOOM = """<script>
 (function () {
   var MIN = 0.15, MAX = 4;
+  var INFO = window.STEP_INFO || {};
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c];
+    });
+  }
 
   function setup(canvas) {
     var viewport = canvas.querySelector('.viewport');
     var stage    = canvas.querySelector('.stage');
     var readout  = canvas.querySelector('.zoom');
+    var svg      = stage.querySelector('svg');
     var s = { k: 1, x: 20, y: 20 };
+    var nat = { w: 0, h: 0 };
+
+    if (svg) {                       // measure once, at scale 1, before any transform
+      var b = svg.getBoundingClientRect();
+      nat = { w: b.width, h: b.height };
+    }
+
+    var mm = canvas.querySelector('.minimap');
+    var mmView = mm && mm.querySelector('.mmview');
 
     function apply() {
       stage.style.transform = 'translate(' + s.x + 'px,' + s.y + 'px) scale(' + s.k + ')';
       if (readout) readout.textContent = Math.round(s.k * 100) + '%';
+      drawMinimap();
     }
-    function natural() {
-      var svg = stage.querySelector('svg');
-      if (!svg) return { w: 0, h: 0 };
-      var r = svg.getBoundingClientRect();
-      return { w: r.width / s.k, h: r.height / s.k };
+    function drawMinimap() {
+      if (!mm || !mmView || !nat.w) return;
+      var r = viewport.getBoundingClientRect();
+      var mb = mm.getBoundingClientRect();
+      var f = Math.min(mb.width / nat.w, mb.height / nat.h);
+      var ox = (mb.width - nat.w * f) / 2, oy = (mb.height - nat.h * f) / 2;
+      mmView.style.left   = (ox + (-s.x / s.k) * f) + 'px';
+      mmView.style.top    = (oy + (-s.y / s.k) * f) + 'px';
+      mmView.style.width  = Math.max(6, (r.width  / s.k) * f) + 'px';
+      mmView.style.height = Math.max(6, (r.height / s.k) * f) + 'px';
     }
     function zoomAt(cx, cy, factor) {
       var k = Math.min(MAX, Math.max(MIN, s.k * factor));
@@ -366,39 +528,63 @@ PANZOOM = """<script>
       zoomAt(r.width / 2, r.height / 2, factor);
     }
     function fit() {
-      var n = natural(), r = viewport.getBoundingClientRect();
-      if (!n.w || !n.h) return;
-      var k = Math.min((r.width - 40) / n.w, (r.height - 40) / n.h);
+      var r = viewport.getBoundingClientRect();
+      if (!nat.w || !nat.h) return;
+      var k = Math.min((r.width - 40) / nat.w, (r.height - 40) / nat.h);
       s.k = Math.min(MAX, Math.max(MIN, k));
-      s.x = (r.width - n.w * s.k) / 2;
+      s.x = (r.width - nat.w * s.k) / 2;
+      s.y = 20;
+      apply();
+    }
+    function open() {
+      // Fitting a 100-step phase into 620px lands near 15% - legible to nobody.
+      // These flows read top-down, so open at actual size and only scale back if
+      // the diagram is too WIDE for the viewport. Vertical is what panning is for,
+      // and Fit is one click (or 'f') away.
+      var r = viewport.getBoundingClientRect();
+      s.k = Math.min(1, (r.width - 40) / nat.w);
+      s.x = Math.max(20, (r.width - nat.w * s.k) / 2);
       s.y = 20;
       apply();
     }
     function reset() { s.k = 1; s.x = 20; s.y = 20; apply(); }
 
+    function centreOn(el) {
+      var sb = stage.getBoundingClientRect(), eb = el.getBoundingClientRect();
+      var cx = (eb.left + eb.width / 2 - sb.left) / s.k;
+      var cy = (eb.top + eb.height / 2 - sb.top) / s.k;
+      var r = viewport.getBoundingClientRect();
+      s.x = r.width / 2 - cx * s.k;
+      s.y = r.height / 2 - cy * s.k;
+      apply();
+    }
+
+    // ---- pan / zoom -------------------------------------------------------
     viewport.addEventListener('wheel', function (e) {
       e.preventDefault();
       var r = viewport.getBoundingClientRect();
       zoomAt(e.clientX - r.left, e.clientY - r.top, e.deltaY < 0 ? 1.12 : 1 / 1.12);
     }, { passive: false });
 
-    var dragging = false, px = 0, py = 0;
+    var dragging = false, moved = 0, px = 0, py = 0;
     viewport.addEventListener('pointerdown', function (e) {
-      dragging = true; px = e.clientX; py = e.clientY;
+      if (e.target.closest('.drawer') || e.target.closest('.minimap')) return;
+      dragging = true; moved = 0; px = e.clientX; py = e.clientY;
       viewport.classList.add('grabbing');
       viewport.setPointerCapture(e.pointerId);
     });
     viewport.addEventListener('pointermove', function (e) {
       if (!dragging) return;
-      s.x += e.clientX - px; s.y += e.clientY - py;
-      px = e.clientX; py = e.clientY; apply();
+      var dx = e.clientX - px, dy = e.clientY - py;
+      moved += Math.abs(dx) + Math.abs(dy);
+      s.x += dx; s.y += dy; px = e.clientX; py = e.clientY; apply();
     });
-    function stop(e) {
+    function stopDrag(e) {
       dragging = false; viewport.classList.remove('grabbing');
       try { viewport.releasePointerCapture(e.pointerId); } catch (_) {}
     }
-    viewport.addEventListener('pointerup', stop);
-    viewport.addEventListener('pointercancel', stop);
+    viewport.addEventListener('pointerup', stopDrag);
+    viewport.addEventListener('pointercancel', stopDrag);
     viewport.addEventListener('dblclick', function (e) {
       e.preventDefault();
       if (window.getSelection) window.getSelection().removeAllRanges();
@@ -406,6 +592,157 @@ PANZOOM = """<script>
     });
     viewport.addEventListener('selectstart', function (e) { e.preventDefault(); });
 
+    // ---- click a command box for its detail -------------------------------
+    var drawer = canvas.querySelector('.drawer');
+    function closeDrawer() {
+      if (drawer) drawer.classList.remove('open');
+      stage.querySelectorAll('g.node.picked').forEach(function (n) {
+        n.classList.remove('picked');
+      });
+    }
+    function showStep(id, g) {
+      var d = INFO[id];
+      if (!d || !drawer) return;
+      stage.querySelectorAll('g.node.picked').forEach(function (n) {
+        n.classList.remove('picked');
+      });
+      g.classList.add('picked');
+      var tag = d.fail === 'stop' ? '<span class="tag tag-stop">stops the run</span>'
+              : d.fail === 'rb'   ? '<span class="tag tag-rb">arms rollback</span>'
+              :                     '<span class="tag tag-cont">run continues</span>';
+      var h = '<h5>Command</h5><pre>' + esc(d.cmd) + '</pre>';
+      h += '<h5>Target</h5><p class="kv"><b>' + esc(d.node) + '</b>' +
+           (d.loop ? ' · inside a retry loop' : '') + '</p>';
+      if (d.when)  h += '<h5>Runs when</h5><pre>' + esc(d.when) + '</pre>';
+      if (d.skip)  h += '<h5>Skipped when</h5><pre>' + esc(d.skip) + '</pre>';
+      if (d.crit)  h += '<h5>Passes if</h5><pre>' + esc(d.crit) + '</pre>';
+      if (d.sets && d.sets.length) {
+        h += '<h5>On failure sets</h5><p class="kv">' +
+             d.sets.map(function (x) { return '<b>' + esc(x) + '</b>'; }).join('<br>') + '</p>';
+      }
+      h += '<h5>On failure</h5><p class="kv">' + tag +
+           ' <span style="margin-left:6px">' + esc(d.failtext || '') + '</span></p>';
+      drawer.querySelector('.n').textContent = d.n;
+      drawer.querySelector('.t').textContent = d.desc || d.node;
+      drawer.querySelector('.body').innerHTML = h;
+      drawer.classList.add('open');
+    }
+    stage.addEventListener('click', function (e) {
+      if (moved > 4) return;                       // that was a pan, not a click
+      var g = e.target.closest('g.node');
+      if (!g) return;
+      var id = (g.id || '').replace(/^flowchart-/, '').replace(/-\\d+$/, '');
+      if (INFO[id]) showStep(id, g); else closeDrawer();
+    });
+    if (drawer) {
+      drawer.querySelector('button').addEventListener('click', closeDrawer);
+    }
+
+    // ---- search ------------------------------------------------------------
+    var find = canvas.querySelector('input.find');
+    var found = canvas.querySelector('.found');
+    var hits = [], at = -1;
+    function runFind() {
+      var q = (find.value || '').trim().toLowerCase();
+      stage.querySelectorAll('g.node.hit').forEach(function (n) { n.classList.remove('hit'); });
+      hits = []; at = -1;
+      if (!q) {
+        stage.classList.remove('filtering');
+        found.textContent = '';
+        return;
+      }
+      stage.querySelectorAll('g.node').forEach(function (g) {
+        // The visible label is wrapped and may be elided, so searching only the
+        // rendered text misses the tail of long commands. Match the full command
+        // and description from STEP_INFO as well.
+        var id = (g.id || '').replace(/^flowchart-/, '').replace(/-\\d+$/, '');
+        var d = INFO[id];
+        var hay = (g.textContent || '');
+        if (d) hay += ' ' + d.cmd + ' ' + d.desc + ' ' + d.node;
+        if (hay.toLowerCase().indexOf(q) >= 0) {
+          g.classList.add('hit'); hits.push(g);
+        }
+      });
+      stage.classList.add('filtering');
+      found.textContent = hits.length ? ('1/' + hits.length) : 'no match';
+      if (hits.length) { at = 0; centreOn(hits[0]); }
+    }
+    function step(dir) {
+      if (!hits.length) return;
+      at = (at + dir + hits.length) % hits.length;
+      found.textContent = (at + 1) + '/' + hits.length;
+      centreOn(hits[at]);
+    }
+    if (find) {
+      var t;
+      find.addEventListener('input', function () {
+        clearTimeout(t); t = setTimeout(runFind, 160);
+      });
+      find.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); step(e.shiftKey ? -1 : 1); }
+        if (e.key === 'Escape') { find.value = ''; runFind(); find.blur(); }
+      });
+    }
+
+    // ---- minimap ------------------------------------------------------------
+    if (mm && svg) {
+      var clone = svg.cloneNode(true);
+      clone.removeAttribute('id');
+      clone.setAttribute('width', '100%');
+      clone.setAttribute('height', '100%');
+      clone.setAttribute('viewBox', '0 0 ' + nat.w + ' ' + nat.h);
+      clone.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+      mm.insertBefore(clone, mmView);
+      mm.addEventListener('click', function (e) {
+        var mb = mm.getBoundingClientRect();
+        var f = Math.min(mb.width / nat.w, mb.height / nat.h);
+        var ox = (mb.width - nat.w * f) / 2, oy = (mb.height - nat.h * f) / 2;
+        var dx = (e.clientX - mb.left - ox) / f, dy = (e.clientY - mb.top - oy) / f;
+        var r = viewport.getBoundingClientRect();
+        s.x = r.width / 2 - dx * s.k;
+        s.y = r.height / 2 - dy * s.k;
+        apply();
+      });
+    }
+
+    // ---- export --------------------------------------------------------------
+    function download(href, name) {
+      var a = document.createElement('a');
+      a.href = href; a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+    }
+    function svgText() {
+      var c = svg.cloneNode(true);
+      c.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+      c.setAttribute('width', nat.w); c.setAttribute('height', nat.h);
+      var st = document.createElementNS('http://www.w3.org/2000/svg', 'style');
+      st.textContent = 'text,span,div,p{font-family:Segoe UI,system-ui,sans-serif;' +
+                       'color:#10243a;fill:#10243a;}';
+      c.insertBefore(st, c.firstChild);
+      return new XMLSerializer().serializeToString(c);
+    }
+    var base = (canvas.getAttribute('data-name') || 'phase').replace(/[^\\w.-]+/g, '_');
+    function exportSvg() {
+      download('data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgText()),
+               base + '.svg');
+    }
+    function exportPng() {
+      var scale = 2, img = new Image();
+      img.onload = function () {
+        var cv = document.createElement('canvas');
+        cv.width = nat.w * scale; cv.height = nat.h * scale;
+        var ctx = cv.getContext('2d');
+        ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cv.width, cv.height);
+        ctx.setTransform(scale, 0, 0, scale, 0, 0);
+        ctx.drawImage(img, 0, 0);
+        try { download(cv.toDataURL('image/png'), base + '.png'); }
+        catch (err) { console.error('png export failed', err); exportSvg(); }
+      };
+      img.onerror = function () { exportSvg(); };
+      img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgText());
+    }
+
+    // ---- toolbar -------------------------------------------------------------
     canvas.querySelectorAll('button[data-act]').forEach(function (b) {
       b.addEventListener('click', function () {
         var a = b.getAttribute('data-act');
@@ -413,6 +750,11 @@ PANZOOM = """<script>
         if (a === 'out')   zoomCentre(1 / 1.25);
         if (a === 'fit')   fit();
         if (a === 'reset') reset();
+        if (a === 'svg')   exportSvg();
+        if (a === 'png')   exportPng();
+        if (a === 'map') {
+          if (mm) { mm.classList.toggle('hidden'); b.classList.toggle('on', !mm.classList.contains('hidden')); }
+        }
         if (a === 'full') {
           if (document.fullscreenElement) document.exitFullscreen();
           else if (canvas.requestFullscreen) canvas.requestFullscreen();
@@ -423,18 +765,36 @@ PANZOOM = """<script>
       if (document.fullscreenElement === canvas) setTimeout(fit, 60);
     });
 
-    fit();
+    // ---- keyboard (only while the pointer is over this canvas) --------------
+    var hot = false;
+    canvas.addEventListener('mouseenter', function () { hot = true; });
+    canvas.addEventListener('mouseleave', function () { hot = false; });
+    document.addEventListener('keydown', function (e) {
+      if (!hot) return;
+      var typing = /^(INPUT|TEXTAREA)$/.test((e.target.tagName || ''));
+      if (e.key === 'Escape') { closeDrawer(); if (find) { find.value = ''; runFind(); } return; }
+      if (typing) return;
+      if (e.key === '/') { e.preventDefault(); if (find) find.focus(); }
+      if (e.key === '+' || e.key === '=') zoomCentre(1.25);
+      if (e.key === '-') zoomCentre(1 / 1.25);
+      if (e.key === '0') reset();
+      if (e.key === 'f') fit();
+      if (e.key === 'n') step(1);
+      if (e.key === 'p') step(-1);
+    });
+
+    open();
+    window.addEventListener('resize', drawMinimap);
   }
 
-  function start() {
-    document.querySelectorAll('.canvas').forEach(setup);
-  }
+  function start() { document.querySelectorAll('.canvas').forEach(setup); }
 
   if (window.mermaid) {
     mermaid.initialize({ startOnLoad: false, securityLevel: 'loose',
                          flowchart: { useMaxWidth: false, htmlLabels: true,
-                                      padding: 10, nodeSpacing: 45, rankSpacing: 58,
-                                      diagramPadding: 24 } });
+                                      curve: 'basis',
+                                      padding: 14, nodeSpacing: 52, rankSpacing: 64,
+                                      diagramPadding: 26 } });
     mermaid.run({ querySelector: '.mermaid' }).then(start).catch(function (e) {
       console.error('mermaid render failed', e); start();
     });
@@ -446,6 +806,9 @@ PANZOOM = """<script>
 
 
 def main():
+    if len(sys.argv) < 3:
+        sys.exit("usage: python gen_command_diagram.py <workflow.yaml> <output.html> "
+                 "[mermaid.min.js]")
     src, dst = sys.argv[1], sys.argv[2]
     merm_path = sys.argv[3] if len(sys.argv) > 3 else None
     if merm_path is None:                      # default: mermaid.min.js next to this script
@@ -454,6 +817,12 @@ def main():
 
     with open(src, encoding="utf-8", errors="replace") as fh:
         doc = yaml.safe_load(fh)
+    if not isinstance(doc, dict) or not doc.get("phases"):
+        sys.exit(f"{src}: not a CLI-CR workflow (no top-level 'phases:' mapping)")
+
+    # a step with no on_failure of its own inherits this
+    default_on_failure = (((doc.get("globals") or {}).get("defaults") or {})
+                          .get("on_failure") or "stop")
 
     phases = OrderedDict()
     for pid, p in (doc.get("phases") or {}).items():
@@ -483,6 +852,7 @@ def main():
     A("</div></nav>")
 
     A('<div class="wrap main">')
+    info = {}
     A('<div class="legend" style="margin-top:20px">'
       '<span><i class="key k-cmd"></i> command sent to a node</span>'
       '<span><i class="key k-gate"></i> condition the engine evaluates</span>'
@@ -502,21 +872,35 @@ def main():
         A(f"<span><b>commands</b> {len(rows)}</span>")
         A("</div>")
 
-        A('<div class="canvas">')
+        A(f'<div class="canvas" data-name="{html.escape(pname)}">')
         A('<div class="toolbar">')
-        A('<button data-act="out" title="Zoom out">&minus;</button>')
+        A('<button data-act="out" title="Zoom out (-)">&minus;</button>')
         A('<span class="zoom">100%</span>')
-        A('<button data-act="in" title="Zoom in">&plus;</button>')
-        A('<button data-act="fit" title="Fit to window">Fit</button>')
-        A('<button data-act="reset" title="Actual size">100%</button>')
-        A('<button data-act="full" title="Fullscreen">Fullscreen</button>')
+        A('<button data-act="in" title="Zoom in (+)">&plus;</button>')
+        A('<button data-act="fit" title="Fit to window (f)">Fit</button>')
+        A('<button data-act="reset" title="Actual size (0)">100%</button>')
+        A('<input class="find" type="search" placeholder="Find a command  /" '
+          'aria-label="Find a command">')
+        A('<span class="found"></span>')
         A('<span class="spacer"></span>')
-        A('<span class="hint">drag to pan · scroll to zoom · double-click to fit</span>')
+        A('<button data-act="map" class="on" title="Toggle minimap">Map</button>')
+        A('<button data-act="svg" title="Download this phase as SVG">SVG</button>')
+        A('<button data-act="png" title="Download this phase as PNG">PNG</button>')
+        A('<button data-act="full" title="Fullscreen">Fullscreen</button>')
         A("</div>")
         A('<div class="viewport"><div class="stage"><pre class="mermaid">')
-        A(phase_diagram(pname, rows, pid))
-        A("</pre></div></div>")
+        A(phase_diagram(pname, rows, pid, default_on_failure))
+        A("</pre></div>")
+        A('<div class="minimap"><div class="mmview"></div></div>')
+        A('<aside class="drawer"><header><span class="n"></span>'
+          '<span class="t"></span><button title="Close">&times;</button></header>'
+          '<div class="body"></div></aside>')
+        A("</div>")
+        A('<p class="hint-row">click any command for its full detail · drag to pan · '
+          "scroll to zoom · <kbd>/</kbd> find · <kbd>f</kbd> fit · <kbd>0</kbd> 100% · "
+          "<kbd>Esc</kbd> clear</p>")
         A("</div></section>")
+        info.update(step_info(rows, pid, default_on_failure))
 
     A(f'<footer>Generated from <code>{html.escape(src)}</code> · {total} commands · '
       "re-run gen_command_diagram.py after any YAML change.</footer>")
@@ -526,6 +910,9 @@ def main():
     if merm_path:
         with open(merm_path, encoding="utf-8", errors="replace") as fh:
             script = f"<script>\n{fh.read()}\n</script>\n"
+    # </script> inside a JSON string would end the tag early
+    payload = json.dumps(info, ensure_ascii=False).replace("</", "<\\/")
+    script += f"<script>window.STEP_INFO = {payload};</script>\n"
     script += PANZOOM
 
     page = ('<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
