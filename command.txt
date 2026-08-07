@@ -1,0 +1,127 @@
+===============================================================================
+ CLI-CR WORKFLOW DIAGRAM GENERATORS  -  how to run
+===============================================================================
+
+ Folder : C:\Users\parmahaj\Documents\Projects\Nokia\exe_flow
+
+ Files  : gen_command_diagram.py     -> flow diagram, every command as a box
+          gen_command_reference.py   -> line-by-line reference document
+          mermaid.min.js             -> diagram renderer, bundled into the output
+                                        (must stay next to the .py files)
+
+ Needs  : Python 3 with pyyaml       ->  pip install pyyaml
+          Nothing else. The generated .html opens offline, no internet needed.
+
+===============================================================================
+ 1. FLOW DIAGRAM  (every command as a box, wired in execution order)
+===============================================================================
+
+cd C:\Users\parmahaj\Documents\Projects\Nokia\exe_flow
+
+python gen_command_diagram.py <workflow.yaml> <output.html>
+
+
+-- DPA / DLU_INSTALLATION -----------------------------------------------------
+
+python gen_command_diagram.py "C:\Users\parmahaj\Documents\Projects\Nokia\JAVA_NOKIA_CLICR_AUTOMATION\src\main\resources\templates\yaml\DPA_DLU_INSTALLATION.yaml" "C:\Users\parmahaj\Documents\Projects\Nokia\exe_flow\DPA_DLU_INSTALLATION_COMMAND_DIAGRAM.html"
+
+
+-- SBC / 96_FIXED_LINE_CONFIGURATION ------------------------------------------
+
+python gen_command_diagram.py "C:\Users\parmahaj\Documents\Projects\Nokia\clicr-simulator\workflows\SBC_96_FIXED_LINE_CONFIGURATION_IN_SBC.yaml" "C:\Users\parmahaj\Documents\Projects\Nokia\exe_flow\SBC_96_COMMAND_DIAGRAM.html"
+
+
+-- any other workflow ---------------------------------------------------------
+
+python gen_command_diagram.py "<full path to the yaml>" "<name>_COMMAND_DIAGRAM.html"
+
+
+===============================================================================
+ 2. LINE-BY-LINE REFERENCE  (command, when it runs, prerequisites, what it sets)
+===============================================================================
+
+python gen_command_reference.py <workflow.yaml> <output.html>
+
+
+-- DPA / DLU_INSTALLATION -----------------------------------------------------
+
+python gen_command_reference.py "C:\Users\parmahaj\Documents\Projects\Nokia\JAVA_NOKIA_CLICR_AUTOMATION\src\main\resources\templates\yaml\DPA_DLU_INSTALLATION.yaml" "C:\Users\parmahaj\Documents\Projects\Nokia\exe_flow\DPA_DLU_INSTALLATION_COMMAND_REFERENCE.html"
+
+
+-- any other workflow ---------------------------------------------------------
+
+python gen_command_reference.py "<full path to the yaml>" "<name>_COMMAND_REFERENCE.html"
+
+
+===============================================================================
+ 3. BOTH AT ONCE  (paste as one line)
+===============================================================================
+
+set YAML=C:\Users\parmahaj\Documents\Projects\Nokia\JAVA_NOKIA_CLICR_AUTOMATION\src\main\resources\templates\yaml\DPA_DLU_INSTALLATION.yaml
+set NAME=DPA_DLU_INSTALLATION
+python gen_command_diagram.py "%YAML%" "%NAME%_COMMAND_DIAGRAM.html" && python gen_command_reference.py "%YAML%" "%NAME%_COMMAND_REFERENCE.html"
+
+ (PowerShell instead of cmd:)
+
+$yaml = "C:\Users\parmahaj\Documents\Projects\Nokia\JAVA_NOKIA_CLICR_AUTOMATION\src\main\resources\templates\yaml\DPA_DLU_INSTALLATION.yaml"
+$name = "DPA_DLU_INSTALLATION"
+python gen_command_diagram.py $yaml "$($name)_COMMAND_DIAGRAM.html"
+python gen_command_reference.py $yaml "$($name)_COMMAND_REFERENCE.html"
+
+
+===============================================================================
+ USING THE DIAGRAM  (works like draw.io)
+===============================================================================
+
+ drag             pan around the canvas
+ scroll wheel     zoom in / out at the mouse pointer
+ double-click     fit the whole phase into the window
+ - / +            zoom out / in from the centre
+ Fit              fit the whole phase into the window
+ 100%             back to actual size
+ Fullscreen       fill the screen (Esc to leave)
+
+ Each phase has its own canvas with its own toolbar. The percentage next to
+ the buttons shows the current zoom.
+
+
+===============================================================================
+ WHAT THE DIAGRAM SHOWS
+===============================================================================
+
+ blue box      a command sent to a node. shows step number, target node
+               (node1 / node2 / repo / OM server / STANDBY / ACTIVE) and the
+               command text.
+ amber diamond a condition the engine evaluates.
+                 - before a box  = the when / skip_when that decides whether
+                                   the step runs at all
+                 - after a box   = the validation, with pass / fail edges
+ grey box      failure that is only recorded - the run carries on
+ orange box    failure that sets ROLLBACK_REQUIRED = true
+ red box       failure that stops the run
+ dashed border the step sits inside a retry loop
+
+ One diagram per phase. Scroll sideways inside a diagram if it is wide.
+
+
+===============================================================================
+ NOTES
+===============================================================================
+
+ * Re-run after ANY change to the yaml - nothing is hand-written, the html is
+   regenerated from the yaml every time.
+
+ * mermaid.min.js must stay in this folder. The script picks it up
+   automatically and embeds it in the html, which is why the output is ~3 MB
+   and why it works with no internet.
+   To use a copy from somewhere else, pass it as a third argument:
+       python gen_command_diagram.py <yaml> <out.html> <path\to\mermaid.min.js>
+
+ * Works with any workflow that uses the standard schema:
+       phases.<id>.name / when / on_failure / steps
+       step: node, send, when, skip_when, register, validation, on_failure
+       type: loop  (loop bodies are expanded once and drawn with a dashed border)
+   REST steps that use "rest:" instead of "send:" are handled too.
+
+ * If the output html shows raw text instead of diagrams, mermaid.min.js was
+   missing when it was generated. Put it back in this folder and re-run.
