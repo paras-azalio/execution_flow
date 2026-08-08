@@ -81,15 +81,48 @@ def wrap(text, width=46, maxlines=3):
     return out
 
 
-def flatten(steps, depth=0, loop=False):
+def flatten(steps, depth=0, loop=None):
+    """Unroll loops once, carrying the LOOP's own when / skip_when down onto its
+    sub-steps. A loop body usually has no conditions of its own - the gate lives
+    on the loop - so dropping it makes those steps look unconditional."""
     for st in steps or []:
         if not isinstance(st, dict):
             continue
         if st.get("type") == "loop":
-            for sub in flatten(st.get("steps"), depth + 1, True):
+            meta = {"when": st.get("when"), "skip_when": st.get("skip_when"),
+                    "label": f"loop over {st.get('for_each', '')}"}
+            for sub in flatten(st.get("steps"), depth + 1, meta):
                 yield sub
         else:
             yield st, loop
+
+
+def and3(a, b):
+    if a is False or b is False:
+        return False
+    if a is UNKNOWN or b is UNKNOWN:
+        return UNKNOWN
+    return True
+
+
+def or3(a, b):
+    if a is True or b is True:
+        return True
+    if a is UNKNOWN or b is UNKNOWN:
+        return UNKNOWN
+    return False
+
+
+def gate_of(st, loop, state):
+    """(when, skip_when) for a step, combined with its enclosing loop's gates."""
+    w = eval_expr(st.get("when"), state) if st.get("when") else True
+    sk = eval_expr(st.get("skip_when"), state) if st.get("skip_when") else False
+    if loop:
+        if loop.get("when"):
+            w = and3(w, eval_expr(loop["when"], state))
+        if loop.get("skip_when"):
+            sk = or3(sk, eval_expr(loop["skip_when"], state))
+    return w, sk
 
 
 def consequence(st, default_on_failure="stop"):
@@ -298,24 +331,96 @@ _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _CMP = re.compile(r"^\s*(.+?)\s*(==|!=|>=|<=|>|<)\s*(.+?)\s*$")
 
 
-# Supplied from outside the workflow (CIQ / arglist). We cannot know their
-# values, so they stay UNKNOWN rather than being read as empty.
-EXTERNAL_UNKNOWN = {
-    "NEW_VERSION", "TAC_COUNT", "NEW_FILE_NAME", "ORDER_NO", "PARENT_REQ_ID",
-    "NODE1_NAME", "NODE2_NAME", "NODE1_NIAM_NAME", "NODE2_NIAM_NAME",
-    "REPO_IP", "REPO_USER", "REPO_PASSWORD", "NIAM_IP", "M2MPORT", "M2MUSER",
-    "M2MPASSWORD", "GITLAB_CLIENT_ID", "GITLAB_CLIENT_SECRET", "GITLAB_PROJECT_ID",
-    "CR_NAME", "Group", "crGroup", "email", "ALERT_EMAIL_TO", "ALERT_EMAIL_CC",
-}
+# Discovered from the workflow, never hardcoded:
+#   WRITTEN  every variable the YAML assigns anywhere. A name outside this set is
+#            supplied from outside the workflow (CIQ / arglist), so its value is
+#            genuinely unknowable here.
+#   NOT_EQ /
+#   KNOWN    facts implied by the phases that DID run. If ACTIVITY is gated on
+#            ${ROLLBACK_ONLY != "true"} and ACTIVITY ran, then ROLLBACK_ONLY is
+#            not "true" - enough to settle any test against that literal, without
+#            this file ever naming the variable.
+#   EXTERNAL a name the workflow never writes but DOES interpolate into command
+#            text must be supplied from outside (CIQ / arglist), so it is
+#            unknowable. A name that is neither written nor used in any command
+#            is simply empty at runtime - which is a definite answer, and is how
+#            a typo'd condition variable behaves.
+WRITTEN = set()
+EXTERNAL = set()
+NOT_EQ = {}
+KNOWN = {}
+
+
+def collect_written(all_rows, gvars):
+    """Every variable name the workflow assigns, in any phase."""
+    out = set(gvars or {})
+    for rows in all_rows:
+        for st, _loop in rows:
+            for r in st.get("register") or []:
+                if not isinstance(r, dict):
+                    continue
+                if r.get("name"):
+                    out.add(r["name"])
+                for m in re.finditer(r"\(\?<([A-Za-z_][A-Za-z0-9_]*)>",
+                                     str(r.get("regex", ""))):
+                    out.add(m.group(1))
+            val = st.get("validation")
+            if isinstance(val, dict):
+                for branch in ("success", "warning", "failure"):
+                    b = val.get(branch)
+                    if isinstance(b, dict):
+                        out.update((b.get("vars") or {}).keys())
+    return out
+
+
+def collect_external(all_rows):
+    """Names interpolated into command text - they must come from outside."""
+    out = set()
+    for rows in all_rows:
+        for st, _loop in rows:
+            blob = " ".join(str(st.get(k, "")) for k in
+                            ("send", "command_description", "var_meta", "rest"))
+            val = st.get("validation")
+            if isinstance(val, dict):
+                blob += " " + str(val.get("description", ""))
+            out.update(re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", blob))
+    return out
+
+
+def phase_facts(when_exprs):
+    """Turn the gates of the phases that DID run into facts."""
+    NOT_EQ.clear()
+    KNOWN.clear()
+    for expr in when_exprs:
+        if not expr:
+            continue
+        s = str(expr).strip()
+        if s.startswith("${") and s.endswith("}"):
+            s = s[2:-1].strip()
+        if "||" in s or "(" in s:
+            continue                      # only unambiguous single facts
+        for atom in s.split("&&"):
+            m = _CMP.match(atom)
+            if not m:
+                continue
+            lhs, op, rhs = m.group(1).strip(), m.group(2), m.group(3).strip()
+            if not _IDENT.match(lhs):
+                continue
+            if not (len(rhs) >= 2 and rhs[0] in "\"'" and rhs[-1] == rhs[0]):
+                continue
+            lit = rhs[1:-1]
+            if op == "!=":
+                NOT_EQ.setdefault(lhs, set()).add(lit)
+            elif op == "==":
+                KNOWN[lhs] = lit
 
 
 def _resolve(tok, state):
     """(known, value) for one side of a comparison.
 
-    A variable the workflow never assigned on this path is NOT unknown - the
-    engine interpolates it as an empty string, which is a definite answer. Only
-    values captured from live command output, or supplied from outside the
-    workflow, are genuinely unknowable here.
+    A variable the workflow assigns somewhere but not on this path is NOT
+    unknown - the engine interpolates it as empty, which is a definite answer.
+    Only live command output and values from outside the workflow are unknowable.
     """
     tok = tok.strip()
     if len(tok) >= 2 and tok[0] in "\"'" and tok[-1] == tok[0]:
@@ -323,9 +428,13 @@ def _resolve(tok, state):
     if _IDENT.match(tok):
         if tok in state:
             return (state[tok] is not None), state[tok]
-        if tok in EXTERNAL_UNKNOWN:
-            return False, None
-        return True, ""          # never assigned -> empty
+        if tok in KNOWN:
+            return True, KNOWN[tok]
+        if tok in WRITTEN:
+            return True, ""      # assigned somewhere, just not on this path
+        if tok in EXTERNAL:
+            return False, None   # supplied from outside the workflow
+        return True, ""          # nothing ever sets it -> empty at runtime
     return False, None
 
 
@@ -333,11 +442,19 @@ def eval_atom(atom, state):
     m = _CMP.match(atom)
     if not m:
         return UNKNOWN
-    lk, lv = _resolve(m.group(1), state)
+    lhs, op, rhs = m.group(1).strip(), m.group(2), m.group(3).strip()
+
+    # a fact from an executed phase's gate settles the test even when the exact
+    # value is unknown ("not 'true'" answers both == 'true' and != 'true')
+    if (op in ("==", "!=") and _IDENT.match(lhs) and lhs not in state
+            and len(rhs) >= 2 and rhs[0] in "\"'" and rhs[-1] == rhs[0]
+            and rhs[1:-1] in NOT_EQ.get(lhs, ())):
+        return op == "!="
+
+    lk, lv = _resolve(lhs, state)
     rk, rv = _resolve(m.group(3), state)
     if not lk or not rk:
         return UNKNOWN
-    op = m.group(2)
     if op == "==":
         return lv == rv
     if op == "!=":
@@ -397,15 +514,21 @@ def _subst(value, state):
     return out
 
 
-def apply_step(st, state, branch):
-    """Apply one step's effects to the variable state."""
+def apply_step(st, state, branch, uncertain=False):
+    """Apply one step's effects to the variable state.
+
+    `uncertain` means we do not know whether the step ran at all, so everything
+    it would write becomes UNKNOWN rather than its concrete value.
+    """
     for r in st.get("register") or []:
         if not isinstance(r, dict):
             continue
         if r.get("name"):
             cond = r.get("when")
             v = eval_expr(cond, state) if cond else True
-            if v is True:
+            if uncertain:
+                state[r["name"]] = None
+            elif v is True:
                 state[r["name"]] = _subst(r.get("value", ""), state)
             elif v is UNKNOWN:
                 state[r["name"]] = None
@@ -418,7 +541,7 @@ def apply_step(st, state, branch):
         b = val.get(branch)
         if isinstance(b, dict):
             for k, v in (b.get("vars") or {}).items():
-                state[k] = str(v)
+                state[k] = None if uncertain else str(v)
 
 
 def arming_points(act_rows):
@@ -433,21 +556,39 @@ def arming_points(act_rows):
     return out
 
 
-def simulate(phase_rows, act_rows, fail_idx, gvars):
-    """State after PRE + BACKUP succeed and ACTIVITY fails at `fail_idx`."""
+def simulate(phase_rows, act_rows, fail_idx, gvars, phase_default_on_failure=None):
+    """State after the earlier phases succeed and ACTIVITY fails at `fail_idx`.
+
+    If the failing step is `on_failure: continue` the run does not stop there,
+    so the remaining steps still execute and still write their variables.
+    """
     state = {}
     for k, v in (gvars or {}).items():
         state[k] = "" if v is None else str(v)
-    state["ROLLBACK_ONLY"] = "false"          # an auto-rollback, not a manual one
+    def ran(st, loop):
+        """False only when a gate definitely rules the step out."""
+        w, sk = gate_of(st, loop, state)
+        return not (w is False or sk is True)
+
     for rows in phase_rows:
-        for st, _loop in rows:
-            apply_step(st, state, "success")
-    for i, (st, _loop) in enumerate(act_rows, 1):
+        for st, loop in rows:
+            if ran(st, loop):
+                apply_step(st, state, "success")
+
+    keep_going = False
+    for i, (st, loop) in enumerate(act_rows, 1):
         if i < fail_idx:
-            apply_step(st, state, "success")
+            if ran(st, loop):
+                apply_step(st, state, "success")
         elif i == fail_idx:
             apply_step(st, state, "failure")
-            break
+            on_fail = st.get("on_failure", phase_default_on_failure)
+            keep_going = (on_fail == "continue")
+            if not keep_going:
+                break
+        else:
+            if ran(st, loop):
+                apply_step(st, state, "success")
     return state
 
 
@@ -455,9 +596,14 @@ def rollback_plan(rb_rows, state):
     """[(idx, step, verdict)] with verdict RUN / SKIP / DEPENDS."""
     plan = []
     st_state = dict(state)
-    for i, (st, _loop) in enumerate(rb_rows, 1):
-        w = eval_expr(st.get("when"), st_state) if st.get("when") else True
-        sk = eval_expr(st.get("skip_when"), st_state) if st.get("skip_when") else False
+    # In an auto-rollback the rollback phase is entered because this is true, and
+    # it stays true for the whole phase - the gates that matter are the per-step
+    # when / skip_when, evaluated against what ACTIVITY managed to write.
+    rb_flag = next((k for k in st_state if k.upper() == "ROLLBACK_REQUIRED"),
+                   "ROLLBACK_REQUIRED")
+    st_state[rb_flag] = "true"
+    for i, (st, loop) in enumerate(rb_rows, 1):
+        w, sk = gate_of(st, loop, st_state)
         if w is False or sk is True:
             verdict = "SKIP"
         elif w is UNKNOWN or sk is UNKNOWN:
@@ -465,8 +611,12 @@ def rollback_plan(rb_rows, state):
         else:
             verdict = "RUN"
         plan.append((i, st, verdict))
-        if verdict != "SKIP":
+        if verdict == "RUN":
             apply_step(st, st_state, "success")
+        elif verdict == "DEPENDS":
+            # we do not know whether it ran, so neither do we know what it wrote
+            apply_step(st, st_state, "success", uncertain=True)
+        st_state[rb_flag] = "true"          # stays true for the whole phase
     return plan
 
 
@@ -581,6 +731,295 @@ def mixed_diagram(act_rows, fail_idx, rb_rows, plan, key):
     return "\n".join(L)
 
 
+def comb_html(act, points, plans):
+    """The activity as a dead-straight vertical column, with each rollback
+    branch running horizontally off its command.
+
+    Laid out directly rather than through mermaid: dagre gives every branch its
+    own rank, which pushes the following activity command sideways and bends the
+    spine. Here the spine is a fixed column and the branch is a row beside it.
+    """
+    out = []
+    A = out.append
+    A('<div class="spine">')
+    for i, (st, _loop) in enumerate(act, 1):
+        node = SHORT_NODE.get(str(st.get("node", "local")), str(st.get("node", "local")))
+        armed = i in plans
+        A(f'<div class="srow{" armed" if armed else ""}">')
+        A(f'<div class="acard{" arm" if armed else ""}" title="{plain(cmd_text(st))}">'
+          f'<span class="an">{i}</span>'
+          f'<span class="anode">{plain(node)}</span>'
+          f'<code>{plain(cmd_text(st), 92)}</code></div>')
+        if armed:
+            plan = plans[i]
+            live = [p for p in plan if p[2] != "SKIP"]
+            nskip = len(plan) - len(live)
+            A('<div class="bwrap">')
+            A(f'<div class="btag">fails &rarr; <b>{len(live)}</b> rollback '
+              f'command{"s" if len(live) != 1 else ""}'
+              f'{f" &middot; {nskip} gated out" if nskip else ""}</div>')
+            A('<div class="branch">')
+            for ri, rst, verdict in live:
+                rnode = SHORT_NODE.get(str(rst.get("node", "local")),
+                                       str(rst.get("node", "local")))
+                cls = "run" if verdict == "RUN" else "dep"
+                note = '<span class="dnote">depends on node</span>' if verdict == "DEPENDS" else ""
+                A(f'<div class="rcard {cls}" title="{plain(cmd_text(rst))}">'
+                  f'<span class="rh"><b>R{ri}</b> <span class="rnode2">{plain(rnode)}</span></span>'
+                  f'<code>{plain(cmd_text(rst), 70)}</code>{note}</div>')
+            A("</div></div>")
+        A("</div>")
+    A("</div>")
+    return "\n".join(out)
+
+
+def _wrap_px(text, chars, lines):
+    """Split text into at most `lines` chunks of about `chars` characters."""
+    words, out, cur = str(text).split(), [], ""
+    for w in words:
+        if cur and len(cur) + 1 + len(w) > chars:
+            out.append(cur)
+            cur = w
+            if len(out) == lines:
+                break
+        else:
+            cur = f"{cur} {w}".strip()
+    if cur and len(out) < lines:
+        out.append(cur)
+    if not out:
+        return [""]
+    joined = len(" ".join(out))
+    if joined < len(" ".join(words)):
+        out[-1] = out[-1][:chars - 2] + "…"
+    return out
+
+
+def comb_svg(act, points, plans):
+    """Draw the activity spine and its rollback branches as SVG directly.
+
+    Mermaid's dagre layout gives every rollback branch its own rank, which
+    shifts the following activity command sideways - there is no way to pin the
+    spine straight from the diagram source. Computing the coordinates here makes
+    the column exact by construction, and the result still drops into the same
+    canvas (pan, zoom, find, minimap, SVG/PNG export all work on any SVG).
+    """
+    AW, AH, RW, RH = 340, 50, 210, 58        # box sizes
+    GAP, ROW, PAD = 12, 78, 24               # spacing
+    SPINE_X = PAD + 26                       # where the vertical rule sits
+
+    maxlen = max((sum(1 for _i, _s, v in plans[i] if v != "SKIP") for i in points),
+                 default=0)
+    width = PAD + AW + 60 + maxlen * (RW + GAP) + PAD
+    height = PAD * 2 + len(act) * ROW
+
+    s = []
+    A = s.append
+    A(f'<svg xmlns="http://www.w3.org/2000/svg" class="drawn" '
+      f'width="{width}" height="{height}" '
+      f'viewBox="0 0 {width} {height}" font-family="Segoe UI, system-ui, sans-serif">')
+    A('<rect width="100%" height="100%" fill="none"/>')
+
+    # the spine: one straight line, top to bottom
+    y0 = PAD + ROW // 2
+    y1 = PAD + (len(act) - 1) * ROW + ROW // 2
+    A(f'<line x1="{SPINE_X}" y1="{y0}" x2="{SPINE_X}" y2="{y1}" '
+      'stroke="#c3d2e2" stroke-width="2"/>')
+
+    for i, (st, _loop) in enumerate(act, 1):
+        y = PAD + (i - 1) * ROW
+        cy = y + ROW // 2
+        armed = i in plans
+        node = SHORT_NODE.get(str(st.get("node", "local")), str(st.get("node", "local")))
+
+        A(f'<circle cx="{SPINE_X}" cy="{cy}" r="4" '
+          f'fill="{"#a93226" if armed else "#8fa6bd"}"/>')
+        A(f'<line x1="{SPINE_X}" y1="{cy}" x2="{PAD + 52}" y2="{cy}" '
+          'stroke="#c3d2e2" stroke-width="2"/>')
+
+        bx, by = PAD + 52, cy - AH // 2
+        stroke, fill, sw = ("#a93226", "#fdeceb", 2) if armed else ("#2a6099", "#eef3f9", 1)
+        A(f'<g class="node" id="act{i}"><rect x="{bx}" y="{by}" width="{AW}" height="{AH}" '
+          f'rx="7" fill="{fill}" stroke="{stroke}" stroke-width="{sw}"/>')
+        A(f'<text x="{bx + 10}" y="{by + 17}" font-size="11" font-weight="700" '
+          f'fill="{"#a93226" if armed else "#2a6099"}">{html.escape(str(i))}. '
+          f'{html.escape(node)}</text>')
+        for n, ln in enumerate(_wrap_px(cmd_text(st), 52, 2)):
+            A(f'<text x="{bx + 10}" y="{by + 31 + n * 12}" font-size="10" '
+              f'font-family="Consolas, monospace" fill="#16222e">{html.escape(ln)}</text>')
+        A("</g>")
+
+        if not armed:
+            continue
+
+        live = [p for p in plans[i] if p[2] != "SKIP"]
+        nskip = len(plans[i]) - len(live)
+        A(f'<line x1="{bx + AW}" y1="{cy}" x2="{bx + AW + 26}" y2="{cy}" '
+          'stroke="#a93226" stroke-width="2"/>')
+        A(f'<text x="{bx + AW + 6}" y="{cy - 8}" font-size="9" font-weight="700" '
+          f'fill="#a93226">FAILS &#8594; {len(live)} run'
+          f'{f" &#183; {nskip} gated out" if nskip else ""}</text>')
+
+        rx = bx + AW + 26
+        for k, (ri, rst, verdict) in enumerate(live):
+            x = rx + k * (RW + GAP)
+            ry = cy - RH // 2
+            rnode = SHORT_NODE.get(str(rst.get("node", "local")),
+                                   str(rst.get("node", "local")))
+            if verdict == "RUN":
+                rs, rf, dash = "#1e7e45", "#eaf5ee", ""
+            else:
+                rs, rf, dash = "#c9a24d", "#fdf8ec", ' stroke-dasharray="4 3"'
+            if k:
+                A(f'<line x1="{x - GAP}" y1="{cy}" x2="{x}" y2="{cy}" '
+                  'stroke="#c3d2e2" stroke-width="1.5"/>')
+            A(f'<g class="node" id="rb{i}_{ri}">'
+              f'<rect x="{x}" y="{ry}" width="{RW}" height="{RH}" rx="6" '
+              f'fill="{rf}" stroke="{rs}" stroke-width="1.5"{dash}/>')
+            A(f'<text x="{x + 8}" y="{ry + 15}" font-size="10" font-weight="700" '
+              f'fill="{rs}">R{ri} &#183; {html.escape(rnode)}</text>')
+            for n, ln in enumerate(_wrap_px(cmd_text(rst), 31, 2)):
+                A(f'<text x="{x + 8}" y="{ry + 29 + n * 11}" font-size="9" '
+                  f'font-family="Consolas, monospace" fill="#16222e">{html.escape(ln)}</text>')
+            if verdict == "DEPENDS":
+                A(f'<text x="{x + 8}" y="{ry + 52}" font-size="8" font-style="italic" '
+                  'fill="#b7770d">depends on node</text>')
+            A("</g>")
+
+    A("</svg>")
+    return "\n".join(s)
+
+
+def comb_diagram(act, rbk, points, plans):
+    """The whole activity as ONE vertical spine, with a horizontal rollback
+    branch hanging off every command that can set ROLLBACK_REQUIRED = true.
+
+    Read down the spine for the normal run; read right off any red command for
+    the rollback commands that failing it would trigger, and on which node.
+    """
+    L = []
+    A = L.append
+    A('%%{init:{"theme":"base","themeVariables":{'
+      '"fontFamily":"Segoe UI, system-ui, sans-serif","fontSize":"12px",'
+      '"primaryColor":"#eaf0f7","primaryTextColor":"#10243a",'
+      '"primaryBorderColor":"#2a6099","lineColor":"#93a7bb",'
+      '"textColor":"#10243a","nodeTextColor":"#10243a",'
+      '"edgeLabelBackground":"#ffffff","mainBkg":"#eaf0f7",'
+      '"clusterBkg":"#fdf6f5","clusterBorder":"#e0b3ad"}}}%%')
+    A("flowchart TD")
+    A('  S(["ACTIVITY_CONFIGURATION"])')
+
+    armed = set(points)
+    plain_a, arm_a, runs, deps = [], [], [], []
+
+    prev = "S"
+    for i, (st, _loop) in enumerate(act, 1):
+        aid = f"a{i}"
+        node = SHORT_NODE.get(str(st.get("node", "local")), str(st.get("node", "local")))
+        A(f'  {aid}["<b>{i}. {clean(node)}</b><br/>{wrap(clean(cmd_text(st)), 36, 2)}"]')
+        A(f"  {prev} --> {aid}")
+        (arm_a if i in armed else plain_a).append(aid)
+        prev = aid
+
+        if i in armed:
+            plan = plans[i]
+            live = [p for p in plan if p[2] != "SKIP"]
+            nskip = len(plan) - len(live)
+            A(f'  subgraph RB{i}["if {i} fails &#183; {len(live)} rollback commands run'
+              f'{f" &#183; {nskip} gated out" if nskip else ""}"]')
+            A("    direction LR")
+            rprev = None
+            for ri, rst, verdict in live:
+                rid = f"b{i}r{ri}"
+                rnode = SHORT_NODE.get(str(rst.get("node", "local")),
+                                       str(rst.get("node", "local")))
+                tail = "<br/><i>depends on node</i>" if verdict == "DEPENDS" else ""
+                A(f'    {rid}["<b>R{ri}. {clean(rnode)}</b><br/>'
+                  f'{wrap(clean(cmd_text(rst)), 30, 2)}{tail}"]')
+                if rprev:
+                    A(f"    {rprev} --> {rid}")
+                (runs if verdict == "RUN" else deps).append(rid)
+                rprev = rid
+            A("  end")
+            A(f'  {aid} -- "fails" --> RB{i}')
+
+    A('  P(["POST_NODE_HEALTH_CHECK"])')
+    A(f"  {prev} --> P")
+
+    A("  classDef step fill:#eaf0f7,stroke:#2a6099,color:#10243a;")
+    A("  classDef arm fill:#fbe0de,stroke:#a93226,color:#6d1f18,stroke-width:2px;")
+    A("  classDef run fill:#e8f2ea,stroke:#1e7e45,color:#0e5227;")
+    A("  classDef dep fill:#fdf7e8,stroke:#c9a24d,color:#6b5417,stroke-dasharray:4 3;")
+    A("  classDef term fill:#e7effa,stroke:#2a6099,color:#1c4470;")
+    for names, cls in ((plain_a, "step"), (arm_a, "arm"), (runs, "run"), (deps, "dep")):
+        if names:
+            A("  class " + ",".join(names) + f" {cls};")
+    A("  class S,P term;")
+    return "\n".join(L)
+
+
+def lanes_diagram(act, rbk, points, plans, show_skipped=True):
+    """One self-contained lane per ACTIVITY command that can arm a rollback.
+
+    Every lane repeats the whole rollback command list for itself, so no two
+    lanes share a box and there is not a single crossing line. Read a lane top
+    to bottom to get exactly which rollback commands that failure triggers, and
+    compare lane heights to see the rollback grow the deeper the failure is.
+    """
+    L = []
+    A = L.append
+    A('%%{init:{"theme":"base","themeVariables":{'
+      '"fontFamily":"Segoe UI, system-ui, sans-serif","fontSize":"12px",'
+      '"primaryColor":"#eaf0f7","primaryTextColor":"#10243a",'
+      '"primaryBorderColor":"#2a6099","lineColor":"#93a7bb",'
+      '"textColor":"#10243a","nodeTextColor":"#10243a",'
+      '"edgeLabelBackground":"#ffffff","mainBkg":"#eaf0f7",'
+      '"clusterBkg":"#f7fafd","clusterBorder":"#c3d2e2"}}}%%')
+    A("flowchart LR")
+
+    runs, deps, skips, heads = [], [], [], []
+    for idx in points:
+        ast = act[idx - 1][0]
+        anode = SHORT_NODE.get(str(ast.get("node", "local")), str(ast.get("node", "local")))
+        plan = plans[idx]
+        live = [p for p in plan if p[2] != "SKIP"]
+        A(f'  subgraph L{idx}["FAIL AT ACTIVITY {idx} &#183; {clean(anode)} &#183; '
+          f'{len(live)} of {len(plan)} rollback commands run"]')
+        A("    direction TB")
+
+        hid = f"h{idx}"
+        A(f'    {hid}["<b>{idx}. {clean(anode)}</b><br/>{wrap(clean(cmd_text(ast)), 34, 2)}"]')
+        heads.append(hid)
+
+        prev = hid
+        for i, rst, verdict in plan:
+            if verdict == "SKIP" and not show_skipped:
+                continue
+            nid = f"f{idx}r{i}"
+            rnode = SHORT_NODE.get(str(rst.get("node", "local")), str(rst.get("node", "local")))
+            tail = ""
+            if verdict == "SKIP":
+                tail = "<br/><i>skipped</i>"
+            elif verdict == "DEPENDS":
+                tail = "<br/><i>depends on node</i>"
+            A(f'    {nid}["<b>R{i}. {clean(rnode)}</b><br/>'
+              f'{wrap(clean(cmd_text(rst)), 34, 2)}{tail}"]')
+            A(f"    {prev} --> {nid}")
+            (runs if verdict == "RUN" else deps if verdict == "DEPENDS" else skips).append(nid)
+            prev = nid
+        A("  end")
+
+    A("  classDef head fill:#fbe0de,stroke:#a93226,color:#6d1f18,stroke-width:2px;")
+    A("  classDef run fill:#eaf0f7,stroke:#2a6099,color:#10243a;")
+    A("  classDef dep fill:#fdf7e8,stroke:#c9a24d,color:#6b5417,stroke-dasharray:4 3;")
+    A("  classDef skip fill:#f2f3f5,stroke:#c8cfd7,color:#a7b0ba,stroke-dasharray:3 3;")
+    if heads:
+        A("  class " + ",".join(heads) + " head;")
+    for names, cls in ((runs, "run"), (deps, "dep"), (skips, "skip")):
+        if names:
+            A("  class " + ",".join(names) + f" {cls};")
+    return "\n".join(L)
+
+
 def mesh_diagram(act, rbk, points, plans):
     """Complete mesh: every rollback-arming ACTIVITY command wired to every
     ROLLBACK step it would actually call.
@@ -650,12 +1089,28 @@ def rollback_section(phases):
         return ""
 
     gvars = ROLLBACK_GLOBALS.get("vars") or {}
+
+    # discover, per workflow: which names the YAML writes anywhere, and what the
+    # gates of the phases that actually ran imply about the names it does not.
+    all_rows = [r for _pid, (_p, r) in phases.items()]
+    WRITTEN.clear()
+    WRITTEN.update(collect_written(all_rows, gvars))
+    EXTERNAL.clear()
+    EXTERNAL.update(collect_external(all_rows) - WRITTEN)
+
+    ran = [p for _pid, (p, rows) in phases.items() if rows in (pre, bkp, act)]
+    phase_facts([p.get("when") for p in ran])
+
+    act_phase = next((p for _pid, (p, rows) in phases.items() if rows is act), {})
+    act_default = (act_phase.get("on_failure")
+                   or (ROLLBACK_GLOBALS.get("defaults") or {}).get("on_failure"))
+
     points = arming_points(act)
     scenarios, matrix, plans = [], [], {}
 
     for n, idx in enumerate(points):
         st = act[idx - 1][0]
-        state = simulate((pre, bkp), act, idx, gvars)
+        state = simulate((pre, bkp), act, idx, gvars, act_default)
         plan = rollback_plan(rbk, state)
         plans[idx] = plan
         key = f"sc{n}"
@@ -685,44 +1140,53 @@ def rollback_section(phases):
       f'<span class="pcount">{len(points)} failure points</span>'
       '<span class="phint">click to collapse</span></div>')
     A('<div class="pbody">')
-    A('<p class="pdesc">Pick an ACTIVITY command that can arm a rollback. The graph shows the '
-      "activity path taken up to that command, the failure, and then only the "
-      "ROLLBACK_CONFIGURATION steps that would actually execute for that failure — the rest are "
-      "drawn dimmed. Which rollback steps run is computed from the workflow's own "
-      "<code>when</code> / <code>skip_when</code> gates against the variable state at the moment "
-      "of failure, not assumed.</p>")
+    counts = [sum(1 for _i, _s, v in plans[i] if v != "SKIP") for i in points]
+    A(f'<p class="pdesc">The whole ACTIVITY phase as one straight vertical run, top to bottom. '
+      f"{len(points)} of its commands are outlined red — those are the ones whose failure sets "
+      "<code>ROLLBACK_REQUIRED = true</code>. Each red command has a <b>horizontal branch</b> "
+      "running off it: the rollback commands that failing <em>that</em> command triggers, in "
+      "order, each on its own node. Which ones those are is computed from the workflow's own "
+      "<code>when</code> / <code>skip_when</code> gates — including the gates that sit on a "
+      "retry <code>loop</code> rather than on its steps — against the variable state at the "
+      f"moment of failure. The branches lengthen further down: {min(counts)} rollback commands "
+      f"at the earliest failure, {max(counts)} at the latest.</p>")
 
-    A('<div class="scen">')
-    for i, sc in enumerate(scenarios):
-        A(f'<button class="scenbtn{" on" if i == 0 else ""}" data-sc="{sc["key"]}" '
-          f'title="{sc["cmd_full"]}">'
-          f'<span class="scl"><b>{sc["idx"]}.</b> <span class="scnode">{sc["node"]}</span> '
-          f'<code>{sc["cmd"]}</code></span>'
-          f'<span class="scd">{sc["desc"]}</span>'
-          f'<span class="scn"><b>{sc["run"]}</b> run · {sc["dep"]} depends · {sc["skip"]} skipped</span>'
-          "</button>")
-    A("</div>")
-
-    A('<div class="canvas" id="rbcanvas">')
-    A('<div class="toolbar">')
-    A('<button data-act="out" title="Zoom out">&minus;</button>')
-    A('<span class="zoom">100%</span>')
-    A('<button data-act="in" title="Zoom in">&plus;</button>')
-    A('<button data-act="fit">Fit</button>')
-    A('<button data-act="reset">100%</button>')
-    A('<button data-act="full">Fullscreen</button>')
-    A('<span class="spacer"></span>')
-    A('<span class="hint" id="rbwhy"></span>')
-    A("</div>")
-    A('<div class="viewport"><div class="stage"></div></div>')
-    A("</div>")
+    A(comb_html(act, points, plans))
 
     A('<div class="legend" style="margin-top:14px">'
-      '<span><i class="key k-ok"></i> activity step that already ran</span>'
-      '<span><i class="key k-stop"></i> the command that failed</span>'
-      '<span><i class="key k-cmd"></i> rollback step that runs</span>'
-      '<span><i class="key k-dep"></i> depends on what the node returns</span>'
-      '<span><i class="key k-skip"></i> skipped by a gate</span></div>')
+      '<span><i class="key k-stop"></i> command whose failure arms the rollback</span>'
+      '<span><i class="key k-run"></i> rollback command that runs</span>'
+      '<span><i class="key k-dep"></i> depends on what the node returns</span></div>')
+
+    # ---- the same thing on a zoomable canvas, like the phase diagrams ----- #
+    A('<h3 class="keyhead" style="margin-top:26px">The same flow on a zoomable canvas</h3>')
+    A('<div class="canvas" data-name="Auto-rollback">')
+    A('<div class="toolbar">')
+    A('<button data-act="out" title="Zoom out (-)">&minus;</button>')
+    A('<span class="zoom">100%</span>')
+    A('<button data-act="in" title="Zoom in (+)">&plus;</button>')
+    A('<button data-act="fit" title="Fit to window (f)">Fit</button>')
+    A('<button data-act="reset" title="Actual size (0)">100%</button>')
+    A('<input class="find" type="search" placeholder="Find a command  /" '
+      'aria-label="Find a command">')
+    A('<span class="found"></span>')
+    A('<span class="spacer"></span>')
+    A('<button data-act="map" class="on" title="Toggle minimap">Map</button>')
+    A('<button data-act="svg" title="Download as SVG">SVG</button>')
+    A('<button data-act="png" title="Download as PNG">PNG</button>')
+    A('<button data-act="full" title="Fullscreen">Fullscreen</button>')
+    A("</div>")
+    A('<div class="viewport"><div class="stage">')
+    A(comb_svg(act, points, plans))
+    A("</div>")
+    A('<div class="minimap"><div class="mmview"></div></div>')
+    A('<aside class="drawer"><header><span class="n"></span>'
+      '<span class="t"></span><button title="Close">&times;</button></header>'
+      '<div class="body"></div></aside>')
+    A("</div>")
+    A('<p class="hint-row">drag to pan · scroll to zoom · <kbd>/</kbd> find · '
+      "<kbd>f</kbd> fit · <kbd>0</kbd> 100% · SVG / PNG to export</p>")
+    A("</div>")
 
     # ---- coverage matrix ------------------------------------------------- #
     A('<h2 style="margin-top:34px">Coverage matrix</h2>')
@@ -753,35 +1217,17 @@ def rollback_section(phases):
           f'<code>{plain(cmd_text(rst), 118)}</code></li>')
     A("</ol>")
 
-    # ---- complete mesh ---------------------------------------------------- #
-    mesh_src, mesh_index = mesh_diagram(act, rbk, points, plans)
-    total_edges = sum(len(v["edges"]) for v in mesh_index.values())
-    A('<h2 style="margin-top:34px">Complete mesh</h2>')
-    A(f'<p class="pdesc">All {len(points)} rollback-arming ACTIVITY commands on the left, all '
-      f"{len(plans[points[0]])} ROLLBACK steps on the right, and every call between them — "
-      f"<b>{total_edges} edges</b>. A solid edge is a step that runs; a dotted edge is one whose "
-      "gate depends on what the node returns. No edge means that step is never called for that "
-      "failure. <b>Click any command to isolate it</b>; click it again, or the background, to "
-      "show the whole mesh.</p>")
-    A('<div class="canvas" id="meshcanvas">')
-    A('<div class="toolbar">')
-    A('<button data-act="out" title="Zoom out">&minus;</button>')
-    A('<span class="zoom">100%</span>')
-    A('<button data-act="in" title="Zoom in">&plus;</button>')
-    A('<button data-act="fit">Fit</button>')
-    A('<button data-act="reset">100%</button>')
-    A('<button data-act="full">Fullscreen</button>')
-    A('<span class="spacer"></span>')
-    A('<span class="hint" id="meshwhy">click a command on the left to isolate its rollback</span>')
-    A("</div>")
-    A('<div class="viewport"><div class="stage"><pre class="mermaid">')
-    A(mesh_src)
-    A("</pre></div></div>")
-    A("</div>")
-    A('<script type="application/json" id="meshdata">')
-    A(json.dumps(mesh_index))
-    A("</script>")
-
+    # ---- one repeated lane per failure ------------------------------------ #
+    counts = [sum(1 for _i, _s, v in plans[i] if v != "SKIP") for i in points]
+    A('<h2 style="margin-top:34px">Activity spine with rollback branches</h2>')
+    A(f'<p class="pdesc">The whole ACTIVITY phase as one vertical run, top to bottom. '
+      f"{len(points)} of its commands are drawn red — those are the ones whose failure sets "
+      "<code>ROLLBACK_REQUIRED = true</code>. Each red command has a <b>horizontal branch</b> "
+      "running off to the right: the rollback commands that failing <em>that</em> command "
+      "triggers, in order, each on its own node. Only the commands that actually run are drawn "
+      "(green), plus the ones that depend on what the node returns (amber dashed); the branch "
+      f"title says how many a gate ruled out. The branches get longer further down — "
+      f"{min(counts)} rollback commands at the earliest failure, {max(counts)} at the latest.</p>")
     A('<script type="application/json" id="rbdata">')
     A(json.dumps({s["key"]: {"m": s["mermaid"], "why": s["why"]} for s in scenarios}))
     A("</script>")
@@ -912,8 +1358,10 @@ code{font-family:var(--mono);font-size:12.5px;background:var(--code-bg);
 .stage svg{max-width:none!important;height:auto;display:block;}
 
 /* keep every label readable whatever the page theme is doing */
-.stage svg .nodeLabel,.stage svg .edgeLabel,.stage svg .label,
-.stage svg text,.stage svg span,.stage svg p{color:#10243a!important;
+/* mermaid-rendered diagrams only - the hand-drawn SVG sets its own colours */
+.stage svg:not(.drawn) .nodeLabel,.stage svg:not(.drawn) .edgeLabel,
+.stage svg:not(.drawn) .label,.stage svg:not(.drawn) text,
+.stage svg:not(.drawn) span,.stage svg:not(.drawn) p{color:#10243a!important;
  fill:#10243a!important;}
 .stage svg .edgeLabel{background:transparent!important;}
 .stage svg .edgeLabel rect{fill:#fff!important;opacity:1!important;}
@@ -1005,6 +1453,7 @@ code{font-family:var(--mono);font-size:12.5px;background:var(--code-bg);
 .k-ok{background:#e4f4ea;border-color:#1e7e45;}
 .k-dep{background:#fdf7e8;border-color:#c9a24d;}
 .k-skip{background:#f0f1f3;border-color:#b9c2cc;}
+.k-run{background:#e8f2ea;border-color:#1e7e45;}
 
 /* ---- auto-rollback explorer --------------------------------------------- */
 .scen{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));
@@ -1049,6 +1498,47 @@ table.mat .rowhead{text-align:left;font-size:11.5px;padding:5px 10px;
  white-space:nowrap;color:var(--ink);position:sticky;left:0;z-index:1;
  background:var(--panel);border-right:1px solid var(--rule);}
 table.mat th.rowhead{color:var(--dim);z-index:3;}
+/* ---- activity spine, laid out by hand so the column is exactly straight -- */
+.spine{position:relative;padding:4px 0 4px 0;}
+.spine::before{content:"";position:absolute;left:169px;top:14px;bottom:14px;
+ width:2px;background:var(--rule);}
+.srow{display:flex;align-items:flex-start;gap:0;margin:0 0 6px;min-width:0;}
+.acard{position:relative;z-index:1;flex:0 0 340px;display:flex;align-items:baseline;
+ gap:8px;background:var(--panel);border:1px solid var(--rule);border-radius:7px;
+ padding:7px 10px;font-size:12px;}
+.acard code{font-family:var(--mono);font-size:11px;background:transparent;
+ color:var(--ink);padding:0;word-break:break-all;line-height:1.35;}
+.an{font-family:var(--mono);font-size:11px;font-weight:700;color:var(--accent);
+ min-width:20px;text-align:right;flex:none;}
+.anode{font-family:var(--mono);font-size:10px;color:var(--dim);flex:none;
+ min-width:56px;}
+.acard.arm{border-color:#c0392b;border-width:2px;background:rgba(169,50,38,.05);}
+.acard.arm .an{color:#a93226;}
+.srow.armed{margin-bottom:12px;}
+.bwrap{flex:1;min-width:0;margin-left:12px;position:relative;}
+.bwrap::before{content:"";position:absolute;left:-12px;top:18px;width:12px;
+ height:2px;background:#c0392b;}
+.btag{font-size:10.5px;color:#a93226;font-weight:700;letter-spacing:.03em;
+ margin:0 0 4px 2px;text-transform:uppercase;}
+.btag b{font-size:12px;}
+.branch{display:flex;gap:7px;overflow-x:auto;padding:0 2px 6px;}
+.rcard{flex:0 0 210px;background:var(--panel);border:1px solid var(--rule);
+ border-radius:6px;padding:6px 9px;font-size:11px;}
+.rcard code{font-family:var(--mono);font-size:10.5px;background:transparent;
+ color:var(--ink);padding:0;word-break:break-all;display:block;margin-top:2px;
+ line-height:1.35;}
+.rcard .rh{font-size:10.5px;color:var(--ink);}
+.rnode2{font-family:var(--mono);font-size:9.5px;color:var(--dim);}
+.rcard.run{border-left:3px solid #1e7e45;}
+.rcard.dep{border-left:3px solid #c9a24d;border-style:dashed;}
+.dnote{display:block;margin-top:3px;font-size:9.5px;color:#b7770d;font-style:italic;}
+@media (max-width:900px){
+  .spine::before{display:none;}
+  .srow{flex-direction:column;}
+  .acard{flex:1 1 auto;width:100%;}
+  .bwrap{margin-left:22px;}
+}
+
 /* mesh: dim everything except the isolated command's calls */
 #meshcanvas .stage svg g.node{cursor:pointer;}
 #meshcanvas .stage svg.isolated .edgePaths path{opacity:.05;}
