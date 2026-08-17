@@ -23,6 +23,9 @@ import yaml
 # identifiers that appear in expressions but are values, not variables
 LITERALS = {
     "true", "false", "SUCCESS", "FAILED", "NA", "and", "or", "not", "null", "None",
+    # engine comparison operators (ExecutionContext.evaluateCondition) and the
+    # ${base64:VAR} prefix - words, but never variable names
+    "contains", "notContains", "startsWith", "notStartsWith", "matches", "base64",
 }
 
 # Values that exist before the workflow starts: injected by the engine's selector
@@ -36,6 +39,10 @@ EXTERNAL = {
     "NEW_FILE_NAME", "NEW_VERSION", "TAC_COUNT", "Group", "crGroup", "email",
     "GITLAB_CLIENT_ID", "GITLAB_CLIENT_SECRET", "GITLAB_PROJECT_ID",
     "ALERT_EMAIL_TO", "ALERT_EMAIL_CC", "nodeName", "node",
+    # standard MOP_EXECUTION arglist keys - present for every workflow, not just DPA
+    "NODE_NAME", "NODE_TYPE", "SUB_ACTIVITY_NAME", "CHILD_REQ_ID", "CR_GROUP",
+    "INPUT_JSON_FILE_NAME", "OUTPUT_LOGS_FILE_LOCATION", "OUTPUT_JSON_REPORT_LOCATION",
+    "SSH_PORT", "NIAM_PORT", "USER", "repo_server_ip",
 }
 
 
@@ -52,6 +59,61 @@ def var_tokens(expr):
         if t not in LITERALS and t not in out:
             out.append(t)
     return out
+
+
+CONDITION_KEYS = ("when", "skip_when", "break_when", "expr")
+
+
+def loop_item_vars(steps):
+    """Names bound by `type: loop` bodies (`item_var`), recursively.
+
+    The loop binds these for the steps inside it. Without this they look like
+    variables nothing ever assigns, which buries the real findings in noise.
+    """
+    found = set()
+    for st in steps or []:
+        if not isinstance(st, dict):
+            continue
+        if st.get("type") == "loop":
+            if st.get("item_var"):
+                found.add(str(st["item_var"]))
+            if st.get("index_var"):
+                found.add(str(st["index_var"]))
+            found |= loop_item_vars(st.get("steps"))
+        else:
+            for key in ("steps", "then", "else"):
+                if isinstance(st.get(key), list):
+                    found |= loop_item_vars(st[key])
+    return found
+
+
+def read_tokens(obj):
+    """Every variable a step *reads*, from anywhere in it.
+
+    Reads hide in more places than the run condition: `node: ${ACTIVE_NODE}`,
+    the command text, validation messages, register values, rest bodies. Walking
+    the whole step and pulling every ${...} - plus the condition keys, whose
+    contents are expressions - is the only way to get this right. Scanning a
+    fixed list of fields silently under-counts and makes live variables look dead.
+    """
+    found = set()
+
+    def walk(o, in_condition=False):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                walk(v, in_condition or k in CONDITION_KEYS)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v, in_condition)
+        elif o is not None:
+            s = str(o)
+            for m in re.finditer(r"\$\{([^}]*)\}", s):
+                found.update(var_tokens(m.group(1)))
+            if in_condition and "${" not in s:
+                found.update(var_tokens(s))
+
+    walk(obj)
+    return found
 
 
 def flatten(steps, phase, depth=0, loop=None):
@@ -132,6 +194,13 @@ def build_index(phases, doc=None):
         setters[v].append(("globals", 0, "workflow default"))
     for v in EXTERNAL:
         setters[v].append(("runtime", 0, "supplied by arglist / CIQ"))
+    # a phase block may seed variables before any of its steps run
+    for pid, p in ((doc or {}).get("phases") or {}).items():
+        if isinstance(p, dict):
+            for v in (p.get("vars") or {}):
+                setters[v].append((p.get("name", pid), 0, "phase var"))
+            for v in loop_item_vars(p.get("steps")):
+                setters[v].append((p.get("name", pid), 0, "loop variable"))
 
     n = 0
     for p in phases.values():
@@ -152,12 +221,114 @@ def build_index(phases, doc=None):
     return setters
 
 
+def audit(phases, setters):
+    """Cross-check every variable read against every variable written.
+
+    Three things go wrong in a hand-edited workflow, and all three are invisible
+    when reading it top-to-bottom:
+
+      never-assigned   a step gates on a variable nothing ever writes, so the
+                       condition is permanently false and the step never runs
+      read-before-set  the only writer runs later than the reader
+      write-only       something is written that nothing reads
+
+    A never-assigned name paired with a write-only near-match is almost always
+    one typo (e.g. FOO written, FOO2 read), so they are reported together.
+    """
+    first_read = {}
+    reads_at = defaultdict(list)
+    for p in phases.values():
+        for row in p["rows"]:
+            idx = row["idx"]
+            for v in read_tokens(row["step"]):
+                reads_at[v].append((p["name"], idx))
+                if v not in first_read:
+                    first_read[v] = (p["name"], idx)
+
+    written = {v: [s for s in l if s[1] > 0] for v, l in setters.items()}
+    preset = {v for v, l in setters.items() if any(i == 0 for _p, i, _h in l)}
+
+    never, late, writeonly = [], [], []
+    for v, places in sorted(reads_at.items()):
+        if v in preset:
+            continue
+        w = written.get(v) or []
+        if not w:
+            never.append((v, places))
+        elif min(i for _p, i, _h in w) > places[0][1]:
+            late.append((v, places[0], min(w, key=lambda s: s[1])))
+
+    for v, w in sorted(written.items()):
+        if w and v not in reads_at:
+            writeonly.append((v, w))
+
+    # pair each never-assigned name with a plausible write-only typo source
+    import difflib
+    wo_names = [v for v, _w in writeonly]
+    twins = {}
+    for v, _places in never:
+        match = difflib.get_close_matches(v, wo_names, n=1, cutoff=0.82)
+        if match:
+            twins[v] = match[0]
+
+    return {"never": never, "late": late, "writeonly": writeonly, "twins": twins}
+
+
+def render_findings(f):
+    """The findings panel. Empty sections are omitted rather than shown green."""
+    n_err = len(f["never"]) + len(f["late"])
+    out = []
+    A = out.append
+    A('<section id="findings"><h2>Findings</h2>')
+    A('<p class="pdesc">Automatic cross-check of every variable read against every '
+      "variable written. These are the mistakes that a top-to-bottom read of the "
+      "YAML will not reveal.</p>")
+
+    if not n_err and not f["writeonly"]:
+        A('<div class="finding ok"><b>No variable-wiring problems found.</b> '
+          "Every condition depends on something that is assigned before it runs.</div>")
+        A("</section>")
+        return "\n".join(out)
+
+    for v, places in f["never"]:
+        where = ", ".join(f'<a href="#s{i}">step {i}</a> ({ph})' for ph, i in places[:6])
+        twin = f["twins"].get(v)
+        hint = ""
+        if twin:
+            hint = (f'<div class="hint">Nothing reads <code>{esc(twin)}</code>, which is '
+                    f"written but never used. <b>These two look like the same variable "
+                    f"with a typo</b> — one of the two names is wrong.</div>")
+        A(f'<div class="finding err"><b>Never assigned:</b> <code>{esc(v)}</code> is read at '
+          f"{where}, but nothing in this workflow ever writes it — it is always empty. "
+          f"A <code>when</code> that tests it never opens; a validation that tests it never "
+          f"passes.{hint}</div>")
+
+    for v, (rph, ridx), (wph, widx, how) in f["late"]:
+        A(f'<div class="finding err"><b>Read before it is set:</b> <code>{esc(v)}</code> is '
+          f'read at <a href="#s{ridx}">step {ridx}</a> ({esc(rph)}) but only written later, '
+          f'at <a href="#s{widx}">step {widx}</a> ({esc(wph)}, {esc(how)}). '
+          f"It is empty when the earlier step reads it.</div>")
+
+    if f["writeonly"]:
+        items = ", ".join(
+            f'<code>{esc(v)}</code> <span class="dim">(step {w[0][1]})</span>'
+            for v, w in f["writeonly"][:40])
+        more = "" if len(f["writeonly"]) <= 40 else f" …and {len(f['writeonly']) - 40} more"
+        A(f'<div class="finding warn"><b>Written but never read ({len(f["writeonly"])}):</b> '
+          f"{items}{more}. Usually harmless — a value captured for the report — but a name "
+          f"here that should have been used is how a typo hides.</div>")
+
+    A("</section>")
+    return "\n".join(out)
+
+
 def esc(x):
     return html.escape(str(x)) if x is not None else ""
 
 
-def render(phases, setters, src):
+def render(phases, setters, src, findings):
     total = sum(len(p["rows"]) for p in phases.values())
+    n_err = len(findings["never"]) + len(findings["late"])
     out = []
     A = out.append
 
@@ -173,12 +344,14 @@ def render(phases, setters, src):
     A("</div></header>")
 
     A('<nav class="rail"><div class="wrap">')
+    A(f'<a href="#findings" class="{"alert" if n_err else ""}">Findings <i>{n_err}</i></a>')
     for p in phases.values():
         A(f'<a href="#{esc(p["id"])}">{esc(p["name"])} <i>{len(p["rows"])}</i></a>')
     A('<a href="#xref">Variable index</a>')
     A("</div></nav>")
 
     A('<div class="wrap main">')
+    A(render_findings(findings))
 
     for p in phases.values():
         A(f'<section id="{esc(p["id"])}">')
@@ -416,6 +589,17 @@ table.full{background:var(--panel);border:1px solid var(--rule);border-radius:6p
 .dim{color:var(--dim);}
 .warnv{color:var(--warn);font-weight:600;}
 .hotrow td{background:rgba(183,119,13,.07);}
+.rail a.alert{color:var(--bad);}
+.rail a.alert i{color:var(--bad);}
+.finding{background:var(--panel);border:1px solid var(--rule);border-left:4px solid var(--dim);
+ border-radius:0 7px 7px 0;padding:11px 15px;margin-bottom:10px;font-size:13.5px;}
+.finding b{color:var(--ink);}
+.finding.err{border-left-color:var(--bad);}
+.finding.warn{border-left-color:var(--warn);}
+.finding.ok{border-left-color:var(--ok);}
+.finding .hint{margin-top:7px;padding-top:7px;border-top:1px dashed var(--rule);
+ font-size:13px;color:var(--dim);}
+.finding .hint b{color:var(--warn);}
 .pill{font-size:10px;font-weight:700;text-transform:uppercase;padding:1px 7px;
  border-radius:10px;}
 .p-success{background:rgba(30,126,69,.14);color:var(--ok);}
@@ -428,13 +612,32 @@ footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--rule);
 
 
 def main():
-    src = sys.argv[1]
-    dst = sys.argv[2]
+    argv = [a for a in sys.argv[1:]]
+    # --external NAME,NAME  declares values this workflow receives from outside
+    # (CIQ fields, arglist keys). They are reported as "never assigned" otherwise,
+    # which is correct in the letter and useless in practice.
+    for i, a in enumerate(list(argv)):
+        if a == "--external" and i + 1 < len(argv):
+            EXTERNAL.update(x.strip() for x in argv[i + 1].split(",") if x.strip())
+            del argv[i:i + 2]
+            break
+        if a.startswith("--external="):
+            EXTERNAL.update(x.strip() for x in a.split("=", 1)[1].split(",") if x.strip())
+            argv.remove(a)
+            break
+    if len(argv) < 2:
+        sys.exit("usage: python gen_command_reference.py <workflow.yaml> <output.html> "
+                 "[--external NAME,NAME]")
+    src = argv[0]
+    dst = argv[1]
     with open(src, encoding="utf-8", errors="replace") as fh:
         doc = yaml.safe_load(fh)
+    if not isinstance(doc, dict) or not doc.get("phases"):
+        sys.exit(f"{src}: not a CLI-CR workflow (no top-level 'phases:' mapping)")
     phases = collect(doc)
     setters = build_index(phases, doc)
-    body = render(phases, setters, src.replace("\\", "/"))
+    findings = audit(phases, setters)
+    body = render(phases, setters, src.replace("\\", "/"), findings)
     page = ("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
             "<style>*{box-sizing:border-box}</style>\n</head>\n<body>\n"
@@ -446,6 +649,19 @@ def main():
     print(f"  phases: {len(phases)}   steps: {total}   variables: {len(setters)}")
     for p in phases.values():
         print(f"    {p['name']:<26} {len(p['rows']):>3} steps")
+
+    # surface the audit on the console too - the whole point is that these are
+    # easy to miss, and nobody scrolls a 3000-line page looking for them.
+    for v, places in findings["never"]:
+        twin = findings["twins"].get(v)
+        extra = f"  (likely a typo of {twin}, which is written but never read)" if twin else ""
+        print(f"  ! never assigned : {v} - read at step {places[0][1]}{extra}")
+    for v, (_rph, ridx), (_wph, widx, _how) in findings["late"]:
+        print(f"  ! read too early : {v} - read at step {ridx}, first written at step {widx}")
+    if findings["writeonly"]:
+        print(f"  - written but never read: {len(findings['writeonly'])}")
+    if findings["never"] or findings["late"]:
+        print("  see the Findings section at the top of the report")
 
 
 if __name__ == "__main__":
