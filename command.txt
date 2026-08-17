@@ -25,6 +25,8 @@ python gen_command_diagram.py <workflow.yaml> <output.html>
 
 python gen_command_diagram.py "C:\Users\parmahaj\Documents\Projects\Nokia\JAVA_NOKIA_CLICR_AUTOMATION\src\main\resources\templates\yaml\DPA_DLU_INSTALLATION.yaml" "C:\Users\parmahaj\Documents\Projects\Nokia\exe_flow\DPA_DLU_INSTALLATION_COMMAND_DIAGRAM.html"
 
+python gen_command_diagram.py "C:\Users\parmahaj\OneDrive - Nokia\Documents\Projects\Nokia\JAVA_NOKIA_CLICR_AUTOMATION\src\main\resources\templates\yaml\DPA_DLU_INSTALLATION.yaml" "C:\Users\parmahaj\OneDrive - Nokia\Documents\Projects\Nokia\exe_flow\DPA_DLU_INSTALLATION_COMMAND_DIAGRAMs.html"
+
 
 -- SBC / 96_FIXED_LINE_CONFIGURATION ------------------------------------------
 
